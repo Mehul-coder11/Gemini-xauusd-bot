@@ -19,16 +19,13 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# --- 1. Flask Web Server (Satisfies Render's Port Requirement) ---
+# --- 1. Flask Web Server (Optimized for Cron Pings) ---
 app = Flask(__name__)
 
 
 @app.route("/")
 def home():
-  return (
-      "XAU/USD Bot Web Service is running and checking markets every 15"
-      " minutes!"
-  )
+  return "OK"
 
 
 def run_flask():
@@ -36,7 +33,7 @@ def run_flask():
   app.run(host="0.0.0.0", port=port)
 
 
-# --- 2. Bot Logic & Market Verification ---
+# --- 2. Market & Bot Logic ---
 def is_market_open():
   try:
     url = f"https://api.twelvedata.com/market_state?apikey={TWELVE_DATA_API_KEY}"
@@ -74,10 +71,12 @@ def fetch_chart_data(interval):
 async def send_telegram_startup():
   try:
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    await bot.send_message(
-        chat_id=TELEGRAM_CHAT_ID,
-        text="🚀 XAU/USD Bot Web Service has successfully started and is running!",
-    )
+    async with bot:
+      await bot.send_message(
+          chat_id=TELEGRAM_CHAT_ID,
+          text="🚀 XAU/USD Bot Web Service has successfully started and is running!",
+      )
+    print("Startup message sent successfully to Telegram.")
   except Exception as e:
     print("Failed to send startup message:", e)
 
@@ -144,7 +143,7 @@ def background_scheduler():
       run_bot_task()
     except Exception as e:
       print("Error in background task:", e)
-    time.sleep(900)  # Sleep for 15 minutes
+    time.sleep(900)
 
 
 if __name__ == "__main__":
