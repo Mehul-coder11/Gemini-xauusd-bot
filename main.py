@@ -131,10 +131,11 @@ def run_bot_task():
       "only when you have confidence of 60 to 70 percent or more; otherwise say "
       "no trade. When there is a trade, tell what to do like buy or sell, state "
       "the exact current price shown on the chart, at what price to enter the trade, "
-      "and what should be the take profit and SL. Always keep risk reward ratio to "
-      "1:2 (TP should be double of SL), only give trades in which SL should not be "
-      "more than 4 dollars, only give intraday trades with a TP that will be achieved "
-      "surely before today market close, and if there is no trade then say no trade simply"
+      "and what should be the take profit and SL. Make sure that you only give "
+      "trades in which the TP is double than the SL, and for this also make sure "
+      "that only give TP which will be achieved before today market close and that "
+      "the given trade should not hit the SL, also keep in mind that I don't want "
+      "logic only give me either the trade or no trade"
   )
 
   response = client.models.generate_content(
