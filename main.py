@@ -34,7 +34,7 @@ def trigger_run():
     run_bot_task()
     return "Bot task executed successfully!", 200
   except Exception as e:
-    return f"Error executing task: {str(e)}, 500"
+    return f"Error executing task: {str(e)}", 500
 
 
 def run_flask():
@@ -71,9 +71,14 @@ def fetch_chart_data(interval):
   df = pd.DataFrame(data["values"])
   df["datetime"] = pd.to_datetime(df["datetime"])
   df.set_index("datetime", inplace=True)
-  df = df.astype(
-      {"open": float, "high": float, "low": float, "close": float, "volume": float}
-  )
+  
+  # Safe casting for Pandas 3.0+
+  cols_to_float = ["open", "high", "low", "close"]
+  if "volume" in df.columns:
+    cols_to_float.append("volume")
+  for col in cols_to_float:
+    df[col] = df[col].astype(float)
+    
   return df.iloc[::-1]
 
 
