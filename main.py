@@ -71,14 +71,13 @@ def fetch_chart_data(interval):
   df = pd.DataFrame(data["values"])
   df["datetime"] = pd.to_datetime(df["datetime"])
   df.set_index("datetime", inplace=True)
-  
-  # Safe casting for Pandas 3.0+
+
   cols_to_float = ["open", "high", "low", "close"]
   if "volume" in df.columns:
     cols_to_float.append("volume")
   for col in cols_to_float:
     df[col] = df[col].astype(float)
-    
+
   return df.iloc[::-1]
 
 
@@ -148,7 +147,15 @@ def run_bot_task():
             ],
         )
 
-  asyncio.run(send_messages())
+  try:
+    loop = asyncio.get_running_loop()
+  except RuntimeError:
+    loop = None
+
+  if loop and loop.is_running():
+    asyncio.run_coroutine_threadsafe(send_messages(), loop)
+  else:
+    asyncio.run(send_messages())
 
 
 def background_scheduler():
@@ -161,13 +168,10 @@ def background_scheduler():
 
 
 if __name__ == "__main__":
-  # Send startup confirmation message asynchronously
   asyncio.run(send_telegram_startup())
 
-  # Start Flask web server in background thread for Render
   flask_thread = Thread(target=run_flask)
   flask_thread.start()
 
-  # Start bot loop in background thread
   bot_thread = Thread(target=background_scheduler)
   bot_thread.start()
