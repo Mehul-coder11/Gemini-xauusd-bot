@@ -126,9 +126,16 @@ def run_bot_task():
   image_15m = client.files.upload(file="chart_15m.png")
 
   prompt = (
-      "Analyze these XAU/USD 1-minute and 15-minute charts. Provide a precise,"
-      " actionable 50-word market summary paragraph outlining current trends,"
-      " key levels, and outlook."
+      "Assume you are a professional and this is the data of live xauusd, "
+      "with 1 minute chart and 15 minute chart please analyse it carefully, "
+      "and give me a trade in xauusd but give trade only when you have confidence "
+      "of 60 to 70 percent or more otherwise say no trade, and when there is a trade "
+      "then also tell what to do like buy or sell and what is the current price "
+      "and at what price to enter the trade and what should be the take profit and sl, "
+      "always keep risk reward ratio to 1 ratio 2 which means tp should be double of "
+      "sl and only give trades in which sl should not be more than 4 dollars, only give "
+      "intraday trades and only give tp which will be achieved surely before today "
+      "market close, and if there is no trade then say no trade simply"
   )
 
   response = client.models.generate_content(
