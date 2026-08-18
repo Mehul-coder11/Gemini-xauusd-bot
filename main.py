@@ -1,4 +1,3 @@
-import asyncio
 import os
 import time
 from datetime import datetime, timezone
@@ -10,7 +9,6 @@ import mplfinance as mpf
 import pandas as pd
 from flask import Flask
 from google import genai
-from telegram import Bot, InputMediaPhoto
 import requests
 
 # Load Environment Variables
@@ -81,25 +79,28 @@ def fetch_chart_data(interval):
   return df.iloc[::-1]
 
 
-async def send_telegram_startup():
-  try:
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    async with bot:
-      await bot.send_message(
-          chat_id=TELEGRAM_CHAT_ID,
-          text="🚀 XAU/USD Bot Web Service has successfully started and is running!",
-      )
-    print("Startup message sent successfully to Telegram.")
-  except Exception as e:
-    print("Failed to send startup message:", e)
+def send_telegram_message(text):
+  url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+  payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+  requests.post(url, json=payload)
+
+
+def send_telegram_photos(caption1, caption2):
+  url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
+  files = {
+      "photo1": open("chart_1m.png", "rb"),
+      "photo2": open("chart_15m.png", "rb"),
+  }
+  media = [
+      {"type": "photo", "media": "attach://photo1", "caption": caption1},
+      {"type": "photo", "media": "attach://photo2", "caption": caption2},
+  ]
+  data = {"chat_id": TELEGRAM_CHAT_ID, "media": str(media).replace("'", '"')}
+  requests.post(url, data=data, files=files)
 
 
 def run_bot_task():
-  if not is_market_open():
-    print("Market is closed. Skipping execution.")
-    return
-
-  print("Market is open. Generating charts...")
+  print("Generating charts...")
   df_1m = fetch_chart_data("1min")
   df_15m = fetch_chart_data("15min")
 
@@ -134,41 +135,27 @@ def run_bot_task():
       model="gemini-2.5-flash", contents=[image_1m, image_15m, prompt]
   )
 
-  async def send_messages():
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    async with bot:
-      await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=response.text)
-      with open("chart_1m.png", "rb") as f1, open("chart_15m.png", "rb") as f2:
-        await bot.send_media_group(
-            chat_id=TELEGRAM_CHAT_ID,
-            media=[
-                InputMediaPhoto(media=f1, caption="1-Minute Chart"),
-                InputMediaPhoto(media=f2, caption="15-Minute Chart"),
-            ],
-        )
-
-  try:
-    loop = asyncio.get_running_loop()
-  except RuntimeError:
-    loop = None
-
-  if loop and loop.is_running():
-    asyncio.run_coroutine_threadsafe(send_messages(), loop)
-  else:
-    asyncio.run(send_messages())
+  send_telegram_message(response.text)
+  send_telegram_photos("1-Minute Chart", "15-Minute Chart")
+  print("Task executed and sent successfully!")
 
 
 def background_scheduler():
   while True:
     try:
-      run_bot_task()
+      if is_market_open():
+        run_bot_task()
+      else:
+        print("Market is closed. Skipping execution.")
     except Exception as e:
       print("Error in background task:", e)
     time.sleep(900)
 
 
 if __name__ == "__main__":
-  asyncio.run(send_telegram_startup())
+  send_telegram_message(
+      "🚀 XAU/USD Bot Web Service has successfully started and is running!"
+  )
 
   flask_thread = Thread(target=run_flask)
   flask_thread.start()
