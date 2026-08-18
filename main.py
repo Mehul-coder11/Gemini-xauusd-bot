@@ -35,7 +35,7 @@ def run_flask():
   app.run(host="0.0.0.0", port=port)
 
 
-# --- 2. Bot Logic ---
+# --- 2. Bot Logic & Market Verification ---
 def is_market_open():
   try:
     url = f"https://api.twelvedata.com/market_state?apikey={TWELVE_DATA_API_KEY}"
@@ -128,14 +128,24 @@ def background_scheduler():
       run_bot_task()
     except Exception as e:
       print("Error in background task:", e)
-    time.sleep(900)  # Sleep for 15 minutes (900 seconds)
+    time.sleep(900)  # Sleep for 15 minutes
 
 
 if __name__ == "__main__":
-  # Start Flask web server in a background thread so Render detects a listening port
+  # Send startup confirmation message to Telegram
+  try:
+    startup_bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    startup_bot.send_message(
+        chat_id=TELEGRAM_CHAT_ID,
+        text="🚀 XAU/USD Bot Web Service has successfully started and is running!",
+    )
+  except Exception as e:
+    print("Failed to send startup message:", e)
+
+  # Start Flask web server in background thread for Render
   flask_thread = Thread(target=run_flask)
   flask_thread.start()
 
-  # Start the bot loop in another background thread
+  # Start bot loop in background thread
   bot_thread = Thread(target=background_scheduler)
   bot_thread.start()
