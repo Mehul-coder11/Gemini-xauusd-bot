@@ -3,3 +3,4 @@ matplotlib
 mplfinance
 google-genai
 python-telegram-bot
+flask
