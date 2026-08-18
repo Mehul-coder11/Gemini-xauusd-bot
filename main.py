@@ -1,46 +1,55 @@
 import os
+import time
 from datetime import datetime
-import requests
+from threading import Thread
 import matplotlib
 
-matplotlib.use('Agg')  # Non-interactive backend to save PNGs securely
+matplotlib.use('Agg')
 import mplfinance as mpf
 import pandas as pd
+from flask import Flask
 from google import genai
-from telegram import Bot
+from telegram import Bot, InputMediaPhoto
+import requests
 
-# Load Environment Variables securely from Render Dashboard
+# Load Environment Variables
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
+# --- 1. Flask Web Server (Satisfies Render's Port Requirement) ---
+app = Flask(__name__)
 
+
+@app.route("/")
+def home():
+  return (
+      "XAU/USD Bot Web Service is running and checking markets every 15"
+      " minutes!"
+  )
+
+
+def run_flask():
+  port = int(os.environ.get("PORT", 10000))
+  app.run(host="0.0.0.0", port=port)
+
+
+# --- 2. Bot Logic ---
 def is_market_open():
-  """Checks Twelve Data market status or relies on UTC Forex Schedule (Sun 22:00 - Fri 21:00 UTC)."""
   try:
     url = f"https://api.twelvedata.com/market_state?apikey={TWELVE_DATA_API_KEY}"
     response = requests.get(url).json()
-    # Find XAU/USD or global forex status
     for item in response.get("forex", []):
       if item.get("symbol") == "XAU/USD":
         return item.get("is_open", False)
-    # Fallback to general check if specific symbol isn't listed
     now = datetime.utcnow()
-    weekday = now.weekday()  # 0=Mon, 4=Fri, 5=Sat, 6=Sun
-    hour = now.hour
-    if weekday == 5:
-      return False  # Saturday closed
-    if weekday == 6 and hour < 22:
-      return False  # Sunday before open
-    if weekday == 4 and hour >= 21:
-      return False  # Friday after close
+    if now.weekday() == 5 or (now.weekday() == 6 and now.hour < 22):
+      return False
+    if now.weekday() == 4 and now.hour >= 21:
+      return False
     return True
-  except Exception as e:
-    print(
-        "Error checking market status via API, falling back to time check:", e
-    )
-    # Basic fallback time check
+  except Exception:
     now = datetime.utcnow()
     if now.weekday() == 5 or (now.weekday() == 6 and now.hour < 22):
       return False
@@ -52,17 +61,21 @@ def fetch_chart_data(interval):
   data = requests.get(url).json()
   if "values" not in data:
     raise ValueError(f"API Error for {interval}: {data}")
-
   df = pd.DataFrame(data["values"])
   df["datetime"] = pd.to_datetime(df["datetime"])
   df.set_index("datetime", inplace=True)
   df = df.astype(
       {"open": float, "high": float, "low": float, "close": float, "volume": float}
   )
-  return df.iloc[::-1]  # Reverse to chronological order
+  return df.iloc[::-1]
 
 
-def generate_pngs():
+def run_bot_task():
+  if not is_market_open():
+    print("Market is closed. Skipping execution.")
+    return
+
+  print("Market is open. Generating charts...")
   df_1m = fetch_chart_data("1min")
   df_15m = fetch_chart_data("15min")
 
@@ -83,37 +96,22 @@ def generate_pngs():
       axisoff=True,
   )
 
-
-def main():
-  if not is_market_open():
-    print("Market is closed. Skipping execution to save resources/limits.")
-    return
-
-  print("Market is open. Generating charts...")
-  generate_pngs()
-
-  # Initialize Gemini Client (Google GenAI SDK)
   client = genai.Client(api_key=GEMINI_API_KEY)
-
-  # Upload or open local images for Gemini
   image_1m = client.files.upload(file="chart_1m.png")
   image_15m = client.files.upload(file="chart_15m.png")
 
   prompt = (
-      "Analyze these XAU/USD 1-minute and 15-minute charts. Provide a precise, "
-      "actionable 50-word market summary paragraph outlining current trends, key levels, and outlook."
+      "Analyze these XAU/USD 1-minute and 15-minute charts. Provide a precise,"
+      " actionable 50-word market summary paragraph outlining current trends,"
+      " key levels, and outlook."
   )
 
   response = client.models.generate_content(
       model="gemini-2.5-flash", contents=[image_1m, image_15m, prompt]
   )
 
-  analysis_text = response.text
-  print("Gemini Response generated successfully.")
-
-  # Send to Telegram Bot
   bot = Bot(token=TELEGRAM_BOT_TOKEN)
-  bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=analysis_text)
+  bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=response.text)
   with open("chart_1m.png", "rb") as f1, open("chart_15m.png", "rb") as f2:
     bot.send_media_group(
         chat_id=TELEGRAM_CHAT_ID,
@@ -124,5 +122,20 @@ def main():
     )
 
 
+def background_scheduler():
+  while True:
+    try:
+      run_bot_task()
+    except Exception as e:
+      print("Error in background task:", e)
+    time.sleep(900)  # Sleep for 15 minutes (900 seconds)
+
+
 if __name__ == "__main__":
-  main()
+  # Start Flask web server in a background thread so Render detects a listening port
+  flask_thread = Thread(target=run_flask)
+  flask_thread.start()
+
+  # Start the bot loop in another background thread
+  bot_thread = Thread(target=background_scheduler)
+  bot_thread.start()
