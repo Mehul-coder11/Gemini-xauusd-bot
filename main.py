@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 from datetime import datetime, timezone
@@ -11,7 +12,6 @@ from flask import Flask
 from google import genai
 from telegram import Bot, InputMediaPhoto
 import requests
-import asyncio
 
 # Load Environment Variables
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
@@ -19,13 +19,22 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# --- 1. Flask Web Server (Optimized for Cron Pings) ---
+# --- 1. Flask Web Server ---
 app = Flask(__name__)
 
 
 @app.route("/")
 def home():
   return "OK"
+
+
+@app.route("/run")
+def trigger_run():
+  try:
+    run_bot_task()
+    return "Bot task executed successfully!", 200
+  except Exception as e:
+    return f"Error executing task: {str(e)}, 500"
 
 
 def run_flask():
