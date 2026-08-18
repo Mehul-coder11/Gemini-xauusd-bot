@@ -135,6 +135,8 @@ def run_bot_task():
       model="gemini-2.5-flash", contents=[image_1m, image_15m, prompt]
   )
 
+  print("AI Response:", response.text[:200])
+
   send_telegram_message(response.text)
   send_telegram_photos("1-Minute Chart", "15-Minute Chart")
   print("Task executed and sent successfully!")
