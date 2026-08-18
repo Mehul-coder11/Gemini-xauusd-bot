@@ -110,7 +110,6 @@ def run_bot_task():
       style="charles",
       savefig="chart_1m.png",
       title="XAU/USD 1m",
-      axisoff=True,
   )
   mpf.plot(
       df_15m,
@@ -118,7 +117,6 @@ def run_bot_task():
       style="charles",
       savefig="chart_15m.png",
       title="XAU/USD 15m",
-      axisoff=True,
   )
 
   client = genai.Client(api_key=GEMINI_API_KEY)
@@ -128,15 +126,15 @@ def run_bot_task():
   prompt = (
       "Assume you are a professional and this is the data of live XAU/USD, "
       "with 1 minute chart and 15 minute chart. Read the current price directly "
-      "from the latest candles on the chart (do not use generic estimates or old data). "
-      "Analyze it carefully and give me a trade in XAU/USD only when you have confidence "
-      "of 60 to 70 percent or more; otherwise say no trade. When there is a trade, "
-      "tell what to do like buy or sell, state the exact current price shown on the chart, "
-      "at what price to enter the trade, and what should be the take profit and SL. "
-      "Always keep risk reward ratio to 1:2 (TP should be double of SL), only give "
-      "trades in which SL should not be more than 4 dollars, only give intraday trades "
-      "with a TP that will be achieved surely before today market close, and if "
-      "there is no trade then say no trade simply"
+      "from the price axis and latest candles on the chart (do not use generic "
+      "estimates or old data). Analyze it carefully and give me a trade in XAU/USD "
+      "only when you have confidence of 60 to 70 percent or more; otherwise say "
+      "no trade. When there is a trade, tell what to do like buy or sell, state "
+      "the exact current price shown on the chart, at what price to enter the trade, "
+      "and what should be the take profit and SL. Always keep risk reward ratio to "
+      "1:2 (TP should be double of SL), only give trades in which SL should not be "
+      "more than 4 dollars, only give intraday trades with a TP that will be achieved "
+      "surely before today market close, and if there is no trade then say no trade simply"
   )
 
   response = client.models.generate_content(
