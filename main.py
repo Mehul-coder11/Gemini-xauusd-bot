@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import Thread
 import matplotlib
 
@@ -11,6 +11,7 @@ from flask import Flask
 from google import genai
 from telegram import Bot, InputMediaPhoto
 import requests
+import asyncio
 
 # Load Environment Variables
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
@@ -43,14 +44,14 @@ def is_market_open():
     for item in response.get("forex", []):
       if item.get("symbol") == "XAU/USD":
         return item.get("is_open", False)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if now.weekday() == 5 or (now.weekday() == 6 and now.hour < 22):
       return False
     if now.weekday() == 4 and now.hour >= 21:
       return False
     return True
   except Exception:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if now.weekday() == 5 or (now.weekday() == 6 and now.hour < 22):
       return False
     return True
@@ -68,6 +69,17 @@ def fetch_chart_data(interval):
       {"open": float, "high": float, "low": float, "close": float, "volume": float}
   )
   return df.iloc[::-1]
+
+
+async def send_telegram_startup():
+  try:
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    await bot.send_message(
+        chat_id=TELEGRAM_CHAT_ID,
+        text="🚀 XAU/USD Bot Web Service has successfully started and is running!",
+    )
+  except Exception as e:
+    print("Failed to send startup message:", e)
 
 
 def run_bot_task():
@@ -110,16 +122,20 @@ def run_bot_task():
       model="gemini-2.5-flash", contents=[image_1m, image_15m, prompt]
   )
 
-  bot = Bot(token=TELEGRAM_BOT_TOKEN)
-  bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=response.text)
-  with open("chart_1m.png", "rb") as f1, open("chart_15m.png", "rb") as f2:
-    bot.send_media_group(
-        chat_id=TELEGRAM_CHAT_ID,
-        media=[
-            InputMediaPhoto(media=f1, caption="1-Minute Chart"),
-            InputMediaPhoto(media=f2, caption="15-Minute Chart"),
-        ],
-    )
+  async def send_messages():
+    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    async with bot:
+      await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=response.text)
+      with open("chart_1m.png", "rb") as f1, open("chart_15m.png", "rb") as f2:
+        await bot.send_media_group(
+            chat_id=TELEGRAM_CHAT_ID,
+            media=[
+                InputMediaPhoto(media=f1, caption="1-Minute Chart"),
+                InputMediaPhoto(media=f2, caption="15-Minute Chart"),
+            ],
+        )
+
+  asyncio.run(send_messages())
 
 
 def background_scheduler():
@@ -132,15 +148,8 @@ def background_scheduler():
 
 
 if __name__ == "__main__":
-  # Send startup confirmation message to Telegram
-  try:
-    startup_bot = Bot(token=TELEGRAM_BOT_TOKEN)
-    startup_bot.send_message(
-        chat_id=TELEGRAM_CHAT_ID,
-        text="🚀 XAU/USD Bot Web Service has successfully started and is running!",
-    )
-  except Exception as e:
-    print("Failed to send startup message:", e)
+  # Send startup confirmation message asynchronously
+  asyncio.run(send_telegram_startup())
 
   # Start Flask web server in background thread for Render
   flask_thread = Thread(target=run_flask)
