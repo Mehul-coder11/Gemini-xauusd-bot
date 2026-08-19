@@ -377,7 +377,7 @@ def run_bot_task():
       "trades in which the TP is double than the SL, and for this also make sure "
       "that only give TP which will be achieved before today market close and that "
       "the given trade should not hit the SL, also keep in mind that I don't want "
-      "logic only give me either the trade or no trade"
+      "logic only give me either the trade or no trade and only give intraday trades."
   )
 
   response = client.models.generate_content(
