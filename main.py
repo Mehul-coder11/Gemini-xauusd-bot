@@ -196,6 +196,7 @@ def get_account_status(current_price):
   status_text = (
       f"\n\n📊 *Virtual Account Status*\n"
       f"• Balance: ${virtual_balance:.2f}\n"
+      f"• Floating PnL: ${floating_pnl:+.2f}\n"
       f"• Equity: ${equity:.2f}\n"
       f"• Used Margin: ${used_margin:.2f}\n"
       f"• Margin Level: {margin_level:.1f}%\n"
@@ -216,7 +217,7 @@ def get_open_trades_details(current_price):
     else:
       pnl = (trade['entry'] - current_price) * lot_size * contract_size
     margin = (trade['entry'] * lot_size * contract_size) / leverage
-    msg += f"\n{idx}. *{trade['type']}* (ACTIVE)\n   • Entry: {trade['entry']} | TP: {trade['tp']} | SL: {trade['sl']}\n   • Margin Used: ${margin:.2f} | PnL: ${pnl:+.2f}"
+    msg += f"\n{idx}. *{trade['type']}* (ACTIVE)\n   • Entry: {trade['entry']} | TP: {trade['tp']} | SL: {trade['sl']}\n   • Margin Used: ${margin:.2f} | Open PnL: ${pnl:+.2f}"
   return msg
 
 
@@ -255,7 +256,7 @@ def track_virtual_trades(df_1m):
   remaining_trades = []
   for trade in active_virtual_trades:
     hit = False
-    # Strictly checking only 1-minute chart candles high/low
+    # Strictly checking 1-minute chart candles high/low for TP/SL hits
     for index, candle in df_1m.iterrows():
       high = candle['high']
       low = candle['low']
@@ -265,14 +266,14 @@ def track_virtual_trades(df_1m):
           profit = (trade['tp'] - trade['entry']) * lot_size * contract_size
           virtual_balance += profit
           closed_trades.append({'type': 'BUY', 'result': 'WIN', 'pnl': profit})
-          send_telegram_message(f"✅ *Virtual BUY Target Hit!*\nTP: {trade['tp']} | Profit: +${profit:.2f}\nNew Balance: ${virtual_balance:.2f}")
+          send_telegram_message(f"✅ *Virtual BUY Target Hit (1m Chart)*\nTP: {trade['tp']} | Profit: +${profit:.2f}\nNew Balance: ${virtual_balance:.2f}")
           hit = True
           break
         elif low <= trade['sl']:
           loss = (trade['entry'] - trade['sl']) * lot_size * contract_size
           virtual_balance -= loss
           closed_trades.append({'type': 'BUY', 'result': 'LOSS', 'pnl': -loss})
-          send_telegram_message(f"❌ *Virtual BUY Stop Loss Hit!*\nSL: {trade['sl']} | Loss: -${loss:.2f}\nNew Balance: ${virtual_balance:.2f}")
+          send_telegram_message(f"❌ *Virtual BUY Stop Loss Hit (1m Chart)*\nSL: {trade['sl']} | Loss: -${loss:.2f}\nNew Balance: ${virtual_balance:.2f}")
           hit = True
           break
       elif trade['type'] == 'SELL':
@@ -280,14 +281,14 @@ def track_virtual_trades(df_1m):
           profit = (trade['entry'] - trade['tp']) * lot_size * contract_size
           virtual_balance += profit
           closed_trades.append({'type': 'SELL', 'result': 'WIN', 'pnl': profit})
-          send_telegram_message(f"✅ *Virtual SELL Target Hit!*\nTP: {trade['tp']} | Profit: +${profit:.2f}\nNew Balance: ${virtual_balance:.2f}")
+          send_telegram_message(f"✅ *Virtual SELL Target Hit (1m Chart)*\nTP: {trade['tp']} | Profit: +${profit:.2f}\nNew Balance: ${virtual_balance:.2f}")
           hit = True
           break
         elif high >= trade['sl']:
           loss = (trade['sl'] - trade['entry']) * lot_size * contract_size
           virtual_balance -= loss
           closed_trades.append({'type': 'SELL', 'result': 'LOSS', 'pnl': -loss})
-          send_telegram_message(f"❌ *Virtual SELL Stop Loss Hit!*\nSL: {trade['sl']} | Loss: -${loss:.2f}\nNew Balance: ${virtual_balance:.2f}")
+          send_telegram_message(f"❌ *Virtual SELL Stop Loss Hit (1m Chart)*\nSL: {trade['sl']} | Loss: -${loss:.2f}\nNew Balance: ${virtual_balance:.2f}")
           hit = True
           break
 
@@ -299,29 +300,72 @@ def track_virtual_trades(df_1m):
 
 
 def parse_trade_from_text(text, current_price):
-  if "no trade" in text.lower():
-    return None
-  t_type = "BUY" if "buy" in text.lower() else "SELL" if "sell" in text.lower() else None
-  if not t_type:
+  text_lower = text.lower()
+  if "no trade" in text_lower or ("trade:" in text_lower and "none" in text_lower):
     return None
 
-  entry_match = re.search(r'(?:entry\s*price|entry|at|price)[:\s]*([\d.]+)', text, re.IGNORECASE)
-  tp_match = re.search(r'(?:take\s*profit|tp)[:\s]*([\d.]+)', text, re.IGNORECASE)
-  sl_match = re.search(r'(?:stop\s*loss|sl)[:\s]*([\d.]+)', text, re.IGNORECASE)
+  if "buy" in text_lower and "sell" not in text_lower:
+    t_type = "BUY"
+  elif "sell" in text_lower and "buy" not in text_lower:
+    t_type = "SELL"
+  elif "buy" in text_lower:
+    t_type = "BUY"
+  elif "sell" in text_lower:
+    t_type = "SELL"
+  else:
+    return None
 
-  entry = float(entry_match.group(1)) if entry_match else current_price
-  tp = float(tp_match.group(1)) if tp_match else 0.0
-  sl = float(sl_match.group(1)) if sl_match else 0.0
+  entry = current_price
+  tp = 0.0
+  sl = 0.0
 
-  if tp > 0 and sl > 0:
-    return {
-        'type': t_type, 
-        'entry': entry, 
-        'tp': tp, 
-        'sl': sl, 
-        'status': 'ACTIVE'
-    }
-  return None
+  for line in text.split('\n'):
+    line_lower = line.lower()
+    if ('entry' in line_lower or 'at' in line_lower) and ('price' in line_lower or 'entry' in line_lower):
+      nums = re.findall(r'[\d.]+', line)
+      if nums:
+        try:
+          val = float(nums[-1])
+          if val > 1000:
+            entry = val
+        except:
+          pass
+    elif 'tp' in line_lower or 'take profit' in line_lower:
+      nums = re.findall(r'[\d.]+', line)
+      if nums:
+        try:
+          tp = float(nums[-1])
+        except:
+          pass
+    elif 'sl' in line_lower or 'stop loss' in line_lower:
+      nums = re.findall(r'[\d.]+', line)
+      if nums:
+        try:
+          sl = float(nums[-1])
+        except:
+          pass
+
+  if tp == 0.0:
+    m = re.search(r'(?:tp|take\s*profit)[:\s]*([\d.]+)', text, re.IGNORECASE)
+    if m:
+      try: tp = float(m.group(1)) except: pass
+  if sl == 0.0:
+    m = re.search(r'(?:sl|stop\s*loss)[:\s]*([\d.]+)', text, re.IGNORECASE)
+    if m:
+      try: sl = float(m.group(1)) except: pass
+
+  if tp == 0.0:
+    tp = current_price + 5.0 if t_type == 'BUY' else current_price - 5.0
+  if sl == 0.0:
+    sl = current_price - 5.0 if t_type == 'BUY' else current_price + 5.0
+
+  return {
+      'type': t_type,
+      'entry': entry,
+      'tp': tp,
+      'sl': sl,
+      'status': 'ACTIVE'
+  }
 
 
 def run_bot_task():
@@ -330,6 +374,7 @@ def run_bot_task():
   df_15m = fetch_chart_data("15min")
   current_price = df_1m.iloc[0]['close']
 
+  # 1. Check existing open trades against 1-minute chart for TP/SL hits first
   track_virtual_trades(df_1m)
 
   mpf.plot(
@@ -361,9 +406,8 @@ def run_bot_task():
       "the exact current price shown on the chart, at what price to enter the trade, "
       "and what should be the take profit and SL. Make sure that you only give "
       "trades in which the TP is double than the SL, and for this also make sure "
-      "that only give TP which will be achieved before today market close and that "
-      "the given trade should not hit the SL, also keep in mind that I don't want "
-      "logic only give me either the trade or no trade"
+      "that only give TP which will be achieved before today market close, "
+      "also keep in mind that I don't want logic only give me either the trade or no trade"
   )
 
   response = client.models.generate_content(
@@ -372,16 +416,18 @@ def run_bot_task():
 
   print("AI Response:", response.text[:200])
 
+  # 2. Evaluate for a new trade and append to active list if found
   new_trade = parse_trade_from_text(response.text, current_price)
   if new_trade:
     active_virtual_trades.append(new_trade)
     send_telegram_message(
         f"📝 *Active Order Opened* ({lot_size} Lot | 1:{leverage} Lev):\n"
         f"Type: {new_trade['type']} | Entry: {new_trade['entry']} | TP: {new_trade['tp']} | SL: {new_trade['sl']}"
-        f"{get_account_status(current_price)}"
     )
 
-  send_telegram_message(response.text + get_account_status(current_price))
+  # 3. Include current open trades summary with open PnL & account status
+  open_trades_summary = get_open_trades_details(current_price)
+  send_telegram_message(response.text + "\n\n" + open_trades_summary + get_account_status(current_price))
   send_telegram_photos("1-Minute Chart", "15-Minute Chart")
   print("Task executed and sent successfully!")
 
