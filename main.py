@@ -305,9 +305,9 @@ def parse_trade_from_text(text, current_price):
   if not t_type:
     return None
 
-  entry_match = re.search(r'(?:entry|at|price)[:\s]*([\d.]+)', text, re.IGNORECASE)
-  tp_match = re.search(r'(?:tp|take profit)[:\s]*([\d.]+)', text, re.IGNORECASE)
-  sl_match = re.search(r'(?:sl|stop loss)[:\s]*([\d.]+)', text, re.IGNORECASE)
+  entry_match = re.search(r'(?:entry\s*price|entry|at|price)[:\s]*([\d.]+)', text, re.IGNORECASE)
+  tp_match = re.search(r'(?:take\s*profit|tp)[:\s]*([\d.]+)', text, re.IGNORECASE)
+  sl_match = re.search(r'(?:stop\s*loss|sl)[:\s]*([\d.]+)', text, re.IGNORECASE)
 
   entry = float(entry_match.group(1)) if entry_match else current_price
   tp = float(tp_match.group(1)) if tp_match else 0.0
