@@ -1,5 +1,6 @@
 import os
 import time
+import traceback
 from datetime import datetime, timezone
 from threading import Thread
 import matplotlib
@@ -32,6 +33,8 @@ def trigger_run():
     run_bot_task()
     return "Bot task executed successfully!", 200
   except Exception as e:
+    print("Error executing task:")
+    traceback.print_exc()
     return f"Error executing task: {str(e)}", 500
 
 
@@ -158,6 +161,7 @@ def background_scheduler():
         print("Market is closed. Skipping execution.")
     except Exception as e:
       print("Error in background task:", e)
+      traceback.print_exc()
     time.sleep(900)
 
 
