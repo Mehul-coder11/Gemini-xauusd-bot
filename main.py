@@ -348,11 +348,17 @@ def parse_trade_from_text(text, current_price):
   if tp == 0.0:
     m = re.search(r'(?:tp|take\s*profit)[:\s]*([\d.]+)', text, re.IGNORECASE)
     if m:
-      try: tp = float(m.group(1)) except: pass
+      try:
+        tp = float(m.group(1))
+      except:
+        pass
   if sl == 0.0:
     m = re.search(r'(?:sl|stop\s*loss)[:\s]*([\d.]+)', text, re.IGNORECASE)
     if m:
-      try: sl = float(m.group(1)) except: pass
+      try:
+        sl = float(m.group(1))
+      except:
+        pass
 
   if tp == 0.0:
     tp = current_price + 5.0 if t_type == 'BUY' else current_price - 5.0
