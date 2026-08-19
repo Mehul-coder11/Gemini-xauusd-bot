@@ -11,12 +11,16 @@ import pandas as pd
 from flask import Flask
 from google import genai
 import requests
+import re
 
 # Load Environment Variables
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+# Virtual Tracker Storage
+active_virtual_trades = []
 
 # --- 1. Flask Web Server ---
 app = Flask(__name__)
@@ -102,10 +106,72 @@ def send_telegram_photos(caption1, caption2):
   requests.post(url, data=data, files=files)
 
 
+def track_virtual_trades(df):
+  global active_virtual_trades
+  if not active_virtual_trades:
+    return
+
+  remaining_trades = []
+  for trade in active_virtual_trades:
+    hit = False
+    for index, candle in df.iterrows():
+      high = candle['high']
+      low = candle['low']
+
+      if trade['type'] == 'BUY':
+        if high >= trade['tp']:
+          send_telegram_message(f"✅ Virtual BUY Target Hit! TP: {trade['tp']}")
+          hit = True
+          break
+        elif low <= trade['sl']:
+          send_telegram_message(f"❌ Virtual BUY Stop Loss Hit! SL: {trade['sl']}")
+          hit = True
+          break
+      elif trade['type'] == 'SELL':
+        if low <= trade['tp']:
+          send_telegram_message(f"✅ Virtual SELL Target Hit! TP: {trade['tp']}")
+          hit = True
+          break
+        elif high >= trade['sl']:
+          send_telegram_message(f"❌ Virtual SELL Stop Loss Hit! SL: {trade['sl']}")
+          hit = True
+          break
+
+    if not hit:
+      remaining_trades.append(trade)
+
+  active_virtual_trades = remaining_trades
+
+
+def parse_trade_from_text(text):
+  if "no trade" in text.lower():
+    return None
+  t_type = "BUY" if "buy" in text.lower() else "SELL" if "sell" in text.lower() else None
+  if not t_type:
+    return None
+
+  tp_match = re.search(r'(?:tp|take profit)[:\s]*([\d.]+)', text, re.IGNORECASE)
+  sl_match = re.search(r'(?:sl|stop loss)[:\s]*([\d.]+)', text, re.IGNORECASE)
+
+  if tp_match and sl_match:
+    try:
+      return {
+          'type': t_type,
+          'tp': float(tp_match.group(1)),
+          'sl': float(sl_match.group(1))
+      }
+    except ValueError:
+      pass
+  return None
+
+
 def run_bot_task():
   print("Generating charts...")
   df_1m = fetch_chart_data("1min")
   df_15m = fetch_chart_data("15min")
+
+  # Track existing virtual trades against latest 1m candles
+  track_virtual_trades(df_1m)
 
   mpf.plot(
       df_1m,
@@ -146,6 +212,12 @@ def run_bot_task():
   )
 
   print("AI Response:", response.text[:200])
+
+  # Check if AI gave a new trade to track
+  new_trade = parse_trade_from_text(response.text)
+  if new_trade:
+    active_virtual_trades.append(new_trade)
+    send_telegram_message(f"📝 Virtual Trade Logged: {new_trade['type']} | TP: {new_trade['tp']} | SL: {new_trade['sl']}")
 
   send_telegram_message(response.text)
   send_telegram_photos("1-Minute Chart", "15-Minute Chart")
