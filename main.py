@@ -266,7 +266,6 @@ def track_virtual_trades(df_1m):
       high = candle['high']
       low = candle['low']
 
-      # 1. If trade is pending, wait for price to touch the entry level on 1m chart
       if trade['status'] == 'PENDING':
         if low <= trade['entry'] <= high:
           trade['status'] = 'ACTIVE'
@@ -274,7 +273,6 @@ def track_virtual_trades(df_1m):
         else:
           continue
 
-      # 2. If trade is active, check TP and SL on 1m chart
       if trade['status'] == 'ACTIVE':
         if trade['type'] == 'BUY':
           if high >= trade['tp']:
@@ -346,7 +344,6 @@ def run_bot_task():
   df_15m = fetch_chart_data("15min")
   current_price = df_1m.iloc[0]['close']
 
-  # Track existing virtual trades strictly against latest 1m candles
   track_virtual_trades(df_1m)
 
   mpf.plot(
@@ -384,7 +381,7 @@ def run_bot_task():
   )
 
   response = client.models.generate_content(
-      model="gemini-2.5-flash", contents=[image_1m, image_15m, prompt]
+      model="gemini-3.5-flash-lite", contents=[image_1m, image_15m, prompt]
   )
 
   print("AI Response:", response.text[:200])
