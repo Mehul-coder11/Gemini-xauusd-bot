@@ -179,7 +179,6 @@ def get_account_status(current_price):
   floating_pnl = 0.0
   used_margin = 0.0
   active_count = 0
-  pending_count = 0
   
   for trade in active_virtual_trades:
     if trade['status'] == 'ACTIVE':
@@ -190,8 +189,6 @@ def get_account_status(current_price):
         floating_pnl += (trade['entry'] - current_price) * lot_size * contract_size
       
       used_margin += (trade['entry'] * lot_size * contract_size) / leverage
-    elif trade['status'] == 'PENDING':
-      pending_count += 1
 
   equity = virtual_balance + floating_pnl
   margin_level = (equity / used_margin * 100) if used_margin > 0 else 0.0
@@ -202,27 +199,24 @@ def get_account_status(current_price):
       f"• Equity: ${equity:.2f}\n"
       f"• Used Margin: ${used_margin:.2f}\n"
       f"• Margin Level: {margin_level:.1f}%\n"
-      f"• Active: {active_count} | Pending: {pending_count}"
+      f"• Active Trades: {active_count}"
   )
   return status_text
 
 
 def get_open_trades_details(current_price):
   if not active_virtual_trades:
-    return "📭 You currently have no open or pending virtual trades."
+    return "📭 You currently have no open virtual trades."
   
-  msg = "📈 *Current Open / Pending Trades:*\n"
+  msg = "📈 *Current Open Trades:*\n"
   for idx, trade in enumerate(active_virtual_trades, 1):
     pnl = 0.0
-    if trade['status'] == 'ACTIVE':
-      if trade['type'] == 'BUY':
-        pnl = (current_price - trade['entry']) * lot_size * contract_size
-      else:
-        pnl = (trade['entry'] - current_price) * lot_size * contract_size
-      margin = (trade['entry'] * lot_size * contract_size) / leverage
-      msg += f"\n{idx}. *{trade['type']}* ({trade['status']})\n   • Entry: {trade['entry']} | TP: {trade['tp']} | SL: {trade['sl']}\n   • Margin Used: ${margin:.2f} | PnL: ${pnl:+.2f}"
+    if trade['type'] == 'BUY':
+      pnl = (current_price - trade['entry']) * lot_size * contract_size
     else:
-      msg += f"\n{idx}. *{trade['type']}* ({trade['status']})\n   • Entry: {trade['entry']} | TP: {trade['tp']} | SL: {trade['sl']}"
+      pnl = (trade['entry'] - current_price) * lot_size * contract_size
+    margin = (trade['entry'] * lot_size * contract_size) / leverage
+    msg += f"\n{idx}. *{trade['type']}* (ACTIVE)\n   • Entry: {trade['entry']} | TP: {trade['tp']} | SL: {trade['sl']}\n   • Margin Used: ${margin:.2f} | PnL: ${pnl:+.2f}"
   return msg
 
 
@@ -266,44 +260,36 @@ def track_virtual_trades(df_1m):
       high = candle['high']
       low = candle['low']
 
-      if trade['status'] == 'PENDING':
-        if low <= trade['entry'] <= high:
-          trade['status'] = 'ACTIVE'
-          send_telegram_message(f"🎯 *Pending Order Triggered!*\n{trade['type']} entry reached at {trade['entry']}")
-        else:
-          continue
-
-      if trade['status'] == 'ACTIVE':
-        if trade['type'] == 'BUY':
-          if high >= trade['tp']:
-            profit = (trade['tp'] - trade['entry']) * lot_size * contract_size
-            virtual_balance += profit
-            closed_trades.append({'type': 'BUY', 'result': 'WIN', 'pnl': profit})
-            send_telegram_message(f"✅ *Virtual BUY Target Hit!*\nTP: {trade['tp']} | Profit: +${profit:.2f}\nNew Balance: ${virtual_balance:.2f}")
-            hit = True
-            break
-          elif low <= trade['sl']:
-            loss = (trade['entry'] - trade['sl']) * lot_size * contract_size
-            virtual_balance -= loss
-            closed_trades.append({'type': 'BUY', 'result': 'LOSS', 'pnl': -loss})
-            send_telegram_message(f"❌ *Virtual BUY Stop Loss Hit!*\nSL: {trade['sl']} | Loss: -${loss:.2f}\nNew Balance: ${virtual_balance:.2f}")
-            hit = True
-            break
-        elif trade['type'] == 'SELL':
-          if low <= trade['tp']:
-            profit = (trade['entry'] - trade['tp']) * lot_size * contract_size
-            virtual_balance += profit
-            closed_trades.append({'type': 'SELL', 'result': 'WIN', 'pnl': profit})
-            send_telegram_message(f"✅ *Virtual SELL Target Hit!*\nTP: {trade['tp']} | Profit: +${profit:.2f}\nNew Balance: ${virtual_balance:.2f}")
-            hit = True
-            break
-          elif high >= trade['sl']:
-            loss = (trade['sl'] - trade['entry']) * lot_size * contract_size
-            virtual_balance -= loss
-            closed_trades.append({'type': 'SELL', 'result': 'LOSS', 'pnl': -loss})
-            send_telegram_message(f"❌ *Virtual SELL Stop Loss Hit!*\nSL: {trade['sl']} | Loss: -${loss:.2f}\nNew Balance: ${virtual_balance:.2f}")
-            hit = True
-            break
+      if trade['type'] == 'BUY':
+        if high >= trade['tp']:
+          profit = (trade['tp'] - trade['entry']) * lot_size * contract_size
+          virtual_balance += profit
+          closed_trades.append({'type': 'BUY', 'result': 'WIN', 'pnl': profit})
+          send_telegram_message(f"✅ *Virtual BUY Target Hit!*\nTP: {trade['tp']} | Profit: +${profit:.2f}\nNew Balance: ${virtual_balance:.2f}")
+          hit = True
+          break
+        elif low <= trade['sl']:
+          loss = (trade['entry'] - trade['sl']) * lot_size * contract_size
+          virtual_balance -= loss
+          closed_trades.append({'type': 'BUY', 'result': 'LOSS', 'pnl': -loss})
+          send_telegram_message(f"❌ *Virtual BUY Stop Loss Hit!*\nSL: {trade['sl']} | Loss: -${loss:.2f}\nNew Balance: ${virtual_balance:.2f}")
+          hit = True
+          break
+      elif trade['type'] == 'SELL':
+        if low <= trade['tp']:
+          profit = (trade['entry'] - trade['tp']) * lot_size * contract_size
+          virtual_balance += profit
+          closed_trades.append({'type': 'SELL', 'result': 'WIN', 'pnl': profit})
+          send_telegram_message(f"✅ *Virtual SELL Target Hit!*\nTP: {trade['tp']} | Profit: +${profit:.2f}\nNew Balance: ${virtual_balance:.2f}")
+          hit = True
+          break
+        elif high >= trade['sl']:
+          loss = (trade['sl'] - trade['entry']) * lot_size * contract_size
+          virtual_balance -= loss
+          closed_trades.append({'type': 'SELL', 'result': 'LOSS', 'pnl': -loss})
+          send_telegram_message(f"❌ *Virtual SELL Stop Loss Hit!*\nSL: {trade['sl']} | Loss: -${loss:.2f}\nNew Balance: ${virtual_balance:.2f}")
+          hit = True
+          break
 
     if not hit:
       remaining_trades.append(trade)
@@ -333,7 +319,7 @@ def parse_trade_from_text(text, current_price):
         'entry': entry, 
         'tp': tp, 
         'sl': sl, 
-        'status': 'PENDING'
+        'status': 'ACTIVE'
     }
   return None
 
@@ -377,7 +363,7 @@ def run_bot_task():
       "trades in which the TP is double than the SL, and for this also make sure "
       "that only give TP which will be achieved before today market close and that "
       "the given trade should not hit the SL, also keep in mind that I don't want "
-      "logic only give me either the trade or no trade and only give intraday trades."
+      "logic only give me either the trade or no trade"
   )
 
   response = client.models.generate_content(
@@ -390,7 +376,7 @@ def run_bot_task():
   if new_trade:
     active_virtual_trades.append(new_trade)
     send_telegram_message(
-        f"📝 *Pending Order Logged* ({lot_size} Lot | 1:{leverage} Lev):\n"
+        f"📝 *Active Order Opened* ({lot_size} Lot | 1:{leverage} Lev):\n"
         f"Type: {new_trade['type']} | Entry: {new_trade['entry']} | TP: {new_trade['tp']} | SL: {new_trade['sl']}"
         f"{get_account_status(current_price)}"
     )
@@ -418,7 +404,7 @@ if __name__ == "__main__":
       "🚀 *XAU/USD Bot Web Service* has successfully started and is running!\n\n"
       "Send commands anytime:\n"
       "/balance - View account balance\n"
-      "/open - View open/pending trades & margin\n"
+      "/open - View open trades & margin\n"
       "/history - View past trade results\n"
       "/report - View win rate, net increase & drawdown"
   )
