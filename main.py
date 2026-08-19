@@ -34,12 +34,12 @@ def home():
 @app.route("/run")
 def trigger_run():
   try:
-    run_bot_task()
-    return "Bot task executed successfully!", 200
+    Thread(target=run_bot_task).start()
+    return "Bot task triggered successfully!", 200
   except Exception as e:
-    print("Error executing task:")
+    print("Error triggering task:")
     traceback.print_exc()
-    return f"Error executing task: {str(e)}", 500
+    return f"Error triggering task: {str(e)}", 500
 
 
 def run_flask():
@@ -197,7 +197,7 @@ def run_bot_task():
       "with 1 minute chart and 15 minute chart. Read the current price directly "
       "from the price axis and latest candles on the chart (do not use generic "
       "estimates or old data). Analyze it carefully and give me a trade in XAU/USD "
-      "only when you have confidence of 60 to 70 percent or more; otherwise say "
+      "only when you are completely sure; otherwise say "
       "no trade. When there is a trade, tell what to do like buy or sell, state "
       "the exact current price shown on the chart, at what price to enter the trade, "
       "and what should be the take profit and SL. Make sure that you only give "
