@@ -4,3 +4,4 @@ mplfinance
 google-genai
 python-telegram-bot
 flask
+websocket-client
