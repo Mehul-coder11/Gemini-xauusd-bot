@@ -3,7 +3,6 @@ import time
 import threading
 import requests
 import pandas as pd
-import mplfinance as mpf
 from flask import Flask, request
 from google import genai
 from telegram import Bot
@@ -98,12 +97,27 @@ def get_bot_report(current_price):
         f"• Total Closed Trades: {len(trade_history)}"
     )
 
+def execute_bot_logic():
+    """Core logic evaluated during /run cron triggers or background task."""
+    try:
+        current_price = get_live_binance_price()
+        df_1m = fetch_binance_klines("1min")
+        
+        # Example evaluation or analysis logic placeholder
+        print(f"Bot executed check. Current Live Price: {current_price}")
+        
+        # If you want it to notify on /run cron, you can enable a notification or trade trigger here:
+        # send_telegram_message(f"🔄 Bot check executed. Live Price: ${current_price:.2f}")
+    except Exception as e:
+        print("Bot Logic Error:", e)
+
 @app.route("/")
 def home():
     return "Gemini XAUUSD Bot is Live and Running!", 200
 
 @app.route("/run")
 def trigger_run():
+    execute_bot_logic()
     return "Background task running successfully.", 200
 
 @app.route("/webhook", methods=["POST"])
@@ -136,6 +150,14 @@ def telegram_webhook():
         print("Webhook Error:", e)
     return "OK", 200
 
+def run_background_loop():
+    while True:
+        execute_bot_logic()
+        time.sleep(60)
+
 if __name__ == "__main__":
+    # Start background thread as backup for continuous uptime
+    threading.Thread(target=run_background_loop, daemon=True).start()
+    
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
