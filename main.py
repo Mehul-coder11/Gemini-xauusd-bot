@@ -59,7 +59,6 @@ def telegram_webhook():
       msg_text = update["message"]["text"].strip().lower()
       chat_id = str(update["message"]["chat"]["id"])
       
-      # Only respond to authorized chat
       if chat_id == str(TELEGRAM_CHAT_ID):
         df_temp = fetch_chart_data("1min")
         current_price = df_temp.iloc[0]['close']
@@ -125,20 +124,6 @@ def send_telegram_message(text):
   url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
   payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
   requests.post(url, json=payload)
-
-
-def send_telegram_photos(caption1, caption2):
-  url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMediaGroup"
-  files = {
-      "photo1": open("chart_1m.png", "rb"),
-      "photo2": open("chart_15m.png", "rb"),
-  }
-  media = [
-      {"type": "photo", "media": "attach://photo1", "caption": caption1},
-      {"type": "photo", "media": "attach://photo2", "caption": caption2},
-  ]
-  data = {"chat_id": TELEGRAM_CHAT_ID, "media": str(media).replace("'", '"')}
-  requests.post(url, data=data, files=files)
 
 
 def check_balance_threshold():
@@ -256,7 +241,6 @@ def track_virtual_trades(df_1m):
   remaining_trades = []
   for trade in active_virtual_trades:
     hit = False
-    # Strictly checking 1-minute chart candles high/low for TP/SL hits
     for index, candle in df_1m.iterrows():
       high = candle['high']
       low = candle['low']
@@ -334,35 +318,43 @@ def parse_trade_from_text(text, current_price):
       nums = re.findall(r'[\d.]+', line)
       if nums:
         try:
-          tp = float(nums[-1])
+          val = float(nums[-1])
+          if val > 1000:
+            tp = val
         except:
           pass
     elif 'sl' in line_lower or 'stop loss' in line_lower:
       nums = re.findall(r'[\d.]+', line)
       if nums:
         try:
-          sl = float(nums[-1])
+          val = float(nums[-1])
+          if val > 1000:
+            sl = val
         except:
           pass
 
-  if tp == 0.0:
+  if tp < 1000:
     m = re.search(r'(?:tp|take\s*profit)[:\s]*([\d.]+)', text, re.IGNORECASE)
     if m:
       try:
-        tp = float(m.group(1))
+        val = float(m.group(1))
+        if val > 1000:
+          tp = val
       except:
         pass
-  if sl == 0.0:
+  if sl < 1000:
     m = re.search(r'(?:sl|stop\s*loss)[:\s]*([\d.]+)', text, re.IGNORECASE)
     if m:
       try:
-        sl = float(m.group(1))
+        val = float(m.group(1))
+        if val > 1000:
+          sl = val
       except:
         pass
 
-  if tp == 0.0:
+  if tp < 1000:
     tp = current_price + 5.0 if t_type == 'BUY' else current_price - 5.0
-  if sl == 0.0:
+  if sl < 1000:
     sl = current_price - 5.0 if t_type == 'BUY' else current_price + 5.0
 
   return {
@@ -405,15 +397,14 @@ def run_bot_task():
   prompt = (
       "Assume you are a professional and this is the data of live XAU/USD, "
       "with 1 minute chart and 15 minute chart. Read the current price directly "
-      "from the price axis and latest candles on the chart (do not use generic "
-      "estimates or old data). Analyze it carefully and give me a trade in XAU/USD "
-      "only when you have confidence of 60 to 70 percent or more; otherwise say "
-      "no trade. When there is a trade, tell what to do like buy or sell, state "
-      "the exact current price shown on the chart, at what price to enter the trade, "
-      "and what should be the take profit and SL. Make sure that you only give "
-      "trades in which the TP is double than the SL, and for this also make sure "
-      "that only give TP which will be achieved before today market close, "
-      "also keep in mind that I don't want logic only give me either the trade or no trade"
+      "from the price axis and latest candles on the chart. Analyze it carefully "
+      "and give me a trade in XAU/USD only when you have confidence of 70 percent or more; "
+      "otherwise say no trade. When there is a trade, tell what to do like buy or sell, state "
+      "the exact current absolute price shown on the chart, at what exact price level to enter, "
+      "and what should be the exact absolute Take Profit (TP) and Stop Loss (SL) price values "
+      "(DO NOT give points or pip numbers like 5 or 6, always write full absolute market prices like 4329.50). "
+      "Make sure that you only give trades in which the TP distance from entry is double than the SL distance, "
+      "and that the TP can be achieved before today market close."
   )
 
   response = client.models.generate_content(
@@ -431,10 +422,9 @@ def run_bot_task():
         f"Type: {new_trade['type']} | Entry: {new_trade['entry']} | TP: {new_trade['tp']} | SL: {new_trade['sl']}"
     )
 
-  # 3. Include current open trades summary with open PnL & account status
+  # 3. Include current open trades summary with open PnL calculated via current price & account status
   open_trades_summary = get_open_trades_details(current_price)
   send_telegram_message(response.text + "\n\n" + open_trades_summary + get_account_status(current_price))
-  send_telegram_photos("1-Minute Chart", "15-Minute Chart")
   print("Task executed and sent successfully!")
 
 
