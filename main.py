@@ -55,6 +55,54 @@ def start_websocket():
 
 Thread(target=start_websocket, daemon=True).start()
 
+# --- Real-Time 1-Second Trade Monitor ---
+def live_trade_monitor():
+  global virtual_balance, active_virtual_trades, closed_trades
+  while True:
+    time.sleep(1)
+    if not active_virtual_trades or latest_live_price == 0.0:
+      continue
+    
+    remaining_trades = []
+    for trade in active_virtual_trades:
+      hit = False
+      current_price = latest_live_price
+      
+      if trade['type'] == 'BUY':
+        if current_price >= trade['tp']:
+          profit = 8.0 * lot_size * contract_size
+          virtual_balance += profit
+          closed_trades.append({'type': 'BUY', 'result': 'WIN', 'pnl': profit})
+          send_telegram_message(f"✅ *Virtual BUY Target Hit*\nTP: {trade['tp']} | Price: {current_price}\nProfit: +${profit:.2f}\nNew Balance: ${virtual_balance:.2f}")
+          hit = True
+        elif current_price <= trade['sl']:
+          loss = 4.0 * lot_size * contract_size
+          virtual_balance -= loss
+          closed_trades.append({'type': 'BUY', 'result': 'LOSS', 'pnl': -loss})
+          send_telegram_message(f"❌ *Virtual BUY Stop Loss Hit*\nSL: {trade['sl']} | Price: {current_price}\nLoss: -${loss:.2f}\nNew Balance: ${virtual_balance:.2f}")
+          hit = True
+      elif trade['type'] == 'SELL':
+        if current_price <= trade['tp']:
+          profit = 8.0 * lot_size * contract_size
+          virtual_balance += profit
+          closed_trades.append({'type': 'SELL', 'result': 'WIN', 'pnl': profit})
+          send_telegram_message(f"✅ *Virtual SELL Target Hit*\nTP: {trade['tp']} | Price: {current_price}\nProfit: +${profit:.2f}\nNew Balance: ${virtual_balance:.2f}")
+          hit = True
+        elif current_price >= trade['sl']:
+          loss = 4.0 * lot_size * contract_size
+          virtual_balance -= loss
+          closed_trades.append({'type': 'SELL', 'result': 'LOSS', 'pnl': -loss})
+          send_telegram_message(f"❌ *Virtual SELL Stop Loss Hit*\nSL: {trade['sl']} | Price: {current_price}\nLoss: -${loss:.2f}\nNew Balance: ${virtual_balance:.2f}")
+          hit = True
+      
+      if not hit:
+        remaining_trades.append(trade)
+    
+    active_virtual_trades = remaining_trades
+    check_balance_threshold()
+
+Thread(target=live_trade_monitor, daemon=True).start()
+
 # --- 1. Flask Web Server ---
 app = Flask(__name__)
 
@@ -84,6 +132,8 @@ def telegram_webhook():
         current_price = latest_live_price if latest_live_price > 0 else 4300.0
         if msg_text == "/balance":
           send_telegram_message(f"💰 *Current Virtual Balance:* ${virtual_balance:.2f}")
+        elif msg_text == "/price":
+          send_telegram_message(f"⚡ *Current Live Price:* ${current_price:.2f}")
         elif msg_text == "/open":
           send_telegram_message(get_open_trades_details(current_price))
         elif msg_text == "/history":
@@ -196,51 +246,6 @@ def get_bot_report(current_price):
       f"• Max Drawdown: ${max_drawdown:.2f}"
   )
 
-def track_virtual_trades(df_1m):
-  global virtual_balance, active_virtual_trades, closed_trades
-  if not active_virtual_trades:
-    return
-  remaining_trades = []
-  for trade in active_virtual_trades:
-    hit = False
-    for index, candle in df_1m.iterrows():
-      high = candle['high']
-      low = candle['low']
-      if trade['type'] == 'BUY':
-        if high >= trade['tp']:
-          profit = 8.0 * lot_size * contract_size
-          virtual_balance += profit
-          closed_trades.append({'type': 'BUY', 'result': 'WIN', 'pnl': profit})
-          send_telegram_message(f"✅ *Virtual BUY Target Hit*\nTP: {trade['tp']} | Profit: +${profit:.2f}\nNew Balance: ${virtual_balance:.2f}")
-          hit = True
-          break
-        elif low <= trade['sl']:
-          loss = 4.0 * lot_size * contract_size
-          virtual_balance -= loss
-          closed_trades.append({'type': 'BUY', 'result': 'LOSS', 'pnl': -loss})
-          send_telegram_message(f"❌ *Virtual BUY Stop Loss Hit*\nSL: {trade['sl']} | Loss: -${loss:.2f}\nNew Balance: ${virtual_balance:.2f}")
-          hit = True
-          break
-      elif trade['type'] == 'SELL':
-        if low <= trade['tp']:
-          profit = 8.0 * lot_size * contract_size
-          virtual_balance += profit
-          closed_trades.append({'type': 'SELL', 'result': 'WIN', 'pnl': profit})
-          send_telegram_message(f"✅ *Virtual SELL Target Hit*\nTP: {trade['tp']} | Profit: +${profit:.2f}\nNew Balance: ${virtual_balance:.2f}")
-          hit = True
-          break
-        elif high >= trade['sl']:
-          loss = 4.0 * lot_size * contract_size
-          virtual_balance -= loss
-          closed_trades.append({'type': 'SELL', 'result': 'LOSS', 'pnl': -loss})
-          send_telegram_message(f"❌ *Virtual SELL Stop Loss Hit*\nSL: {trade['sl']} | Loss: -${loss:.2f}\nNew Balance: ${virtual_balance:.2f}")
-          hit = True
-          break
-    if not hit:
-      remaining_trades.append(trade)
-  active_virtual_trades = remaining_trades
-  check_balance_threshold()
-
 def parse_trade_from_text(text, current_price):
   text_lower = text.lower()
   if "no trade" in text_lower:
@@ -271,8 +276,6 @@ def run_bot_task():
   df_15m = fetch_chart_data("15min")
   current_price = latest_live_price if latest_live_price > 0 else df_1m.iloc[0]['close']
 
-  track_virtual_trades(df_1m)
-
   mpf.plot(df_1m, type="candle", style="charles", savefig=dict(fname="chart_1m.png", dpi=100))
   mpf.plot(df_15m, type="candle", style="charles", savefig=dict(fname="chart_15m.png", dpi=100))
 
@@ -281,7 +284,8 @@ def run_bot_task():
   image_15m = client.files.upload(file="chart_15m.png")
 
   prompt = (
-      "Analyze the attached 1m and 15m charts of XAU/USD using demand/supply zones, "
+      f"Current Live Price of XAU/USD is {current_price}. "
+      "Analyze the attached 1m and 15m charts using demand/supply zones, "
       "liquidity reversals, and high-probability momentum. "
       "Provide ONLY the trade signal layout without any analysis or extra words. "
       "Format strictly like this:\n"
@@ -299,12 +303,13 @@ def run_bot_task():
     active_virtual_trades.append(new_trade)
     send_telegram_message(
         f"📝 *Trade Signal Executed*\n"
+        f"Live Price at Execution: ${current_price:.2f}\n"
         f"Type: {new_trade['type']} | Entry: {new_trade['entry']}\n"
         f"TP: {new_trade['tp']} | SL: {new_trade['sl']}"
     )
 
   open_trades_summary = get_open_trades_details(current_price)
-  send_telegram_message(response.text + "\n\n" + open_trades_summary + get_account_status(current_price))
+  send_telegram_message(f"⚡ *Live Price:* ${current_price:.2f}\n\n" + response.text + "\n\n" + open_trades_summary + get_account_status(current_price))
 
 def background_scheduler():
   while True:
