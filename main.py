@@ -9,12 +9,10 @@ import pandas as pd
 from flask import Flask, request
 from google import genai
 import requests
-import re
 import websocket
 import json
 
 # Load Environment Variables
-TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -31,6 +29,17 @@ peak_equity = 20.0
 max_drawdown = 0.0
 low_balance_alert_sent = False
 latest_live_price = 0.0
+
+# --- Direct Binance Price Fetcher (100% Accurate) ---
+def get_live_binance_price():
+  try:
+    url = "https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT"
+    res = requests.get(url, timeout=5).json()
+    if 'price' in res:
+      return float(res['price'])
+  except Exception:
+    pass
+  return 0.0
 
 # --- Live Price Web Socket Background Thread ---
 def on_message(ws, message):
@@ -60,14 +69,16 @@ def live_trade_monitor():
   global virtual_balance, active_virtual_trades, closed_trades
   while True:
     time.sleep(1)
-    if not active_virtual_trades or latest_live_price == 0.0:
+    current_price = get_live_binance_price()
+    if current_price == 0.0:
+      current_price = latest_live_price
+      
+    if not active_virtual_trades or current_price == 0.0:
       continue
     
     remaining_trades = []
     for trade in active_virtual_trades:
       hit = False
-      current_price = latest_live_price
-      
       if trade['type'] == 'BUY':
         if current_price >= trade['tp']:
           profit = 8.0 * lot_size * contract_size
@@ -129,7 +140,10 @@ def telegram_webhook():
       chat_id = str(update["message"]["chat"]["id"])
       
       if chat_id == str(TELEGRAM_CHAT_ID):
-        current_price = latest_live_price if latest_live_price > 0 else 4500.0
+        current_price = get_live_binance_price()
+        if current_price == 0.0:
+          current_price = latest_live_price if latest_live_price > 0 else 4500.0
+
         if msg_text == "/balance":
           send_telegram_message(f"💰 *Current Virtual Balance:* ${virtual_balance:.2f}")
         elif msg_text == "/price":
@@ -149,17 +163,24 @@ def run_flask():
   app.run(host="0.0.0.0", port=port)
 
 # --- 2. Market & Bot Logic ---
-def fetch_chart_data(interval):
-  url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval={interval}&outputsize=30&apikey={TWELVE_DATA_API_KEY}"
-  data = requests.get(url).json()
-  if "values" not in data:
-    raise ValueError(f"API Error for {interval}: {data}")
-  df = pd.DataFrame(data["values"])
-  df["datetime"] = pd.to_datetime(df["datetime"])
+def fetch_binance_klines(interval):
+  interval_map = {"1min": "1m", "15min": "15m"}
+  binance_interval = interval_map.get(interval, "1m")
+  url = f"https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=30"
+  res = requests.get(url).json()
+  
+  data = []
+  for candle in res:
+    data.append({
+        "datetime": pd.to_datetime(candle[0], unit='ms'),
+        "open": float(candle[1]),
+        "high": float(candle[2]),
+        "low": float(candle[3]),
+        "close": float(candle[4])
+    })
+  df = pd.DataFrame(data)
   df.set_index("datetime", inplace=True)
-  for col in ["open", "high", "low", "close"]:
-    df[col] = df[col].astype(float)
-  return df.iloc[::-1]
+  return df
 
 def send_telegram_message(text):
   url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -272,9 +293,13 @@ def parse_trade_from_text(text, current_price):
   return {'type': t_type, 'entry': entry, 'tp': tp, 'sl': sl, 'status': 'ACTIVE'}
 
 def run_bot_task():
-  df_1m = fetch_chart_data("1min")
-  df_15m = fetch_chart_data("15min")
-  current_price = latest_live_price if latest_live_price > 0 else df_1m.iloc[0]['close']
+  df_1m = fetch_binance_klines("1min")
+  df_15m = fetch_binance_klines("15min")
+  
+  # Force fresh REST API price check so it never uses old cached/default values
+  current_price = get_live_binance_price()
+  if current_price == 0.0:
+    current_price = df_1m.iloc[-1]['close']
 
   mpf.plot(df_1m, type="candle", style="charles", savefig=dict(fname="chart_1m.png", dpi=100))
   mpf.plot(df_15m, type="candle", style="charles", savefig=dict(fname="chart_15m.png", dpi=100))
@@ -284,7 +309,7 @@ def run_bot_task():
   image_15m = client.files.upload(file="chart_15m.png")
 
   prompt = (
-      f"Current Live Price of XAU/USD is {current_price}. "
+      f"Current Live Price of PAXG/USDT is {current_price}. "
       "Analyze the attached 1m and 15m charts using demand/supply zones, "
       "liquidity reversals, and high-probability momentum. "
       "Provide ONLY the trade signal layout without any analysis or extra words. "
