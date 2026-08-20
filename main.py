@@ -208,14 +208,14 @@ def track_virtual_trades(df_1m):
       low = candle['low']
       if trade['type'] == 'BUY':
         if high >= trade['tp']:
-          profit = abs(trade['tp'] - trade['entry']) * lot_size * contract_size
+          profit = 8.0 * lot_size * contract_size
           virtual_balance += profit
           closed_trades.append({'type': 'BUY', 'result': 'WIN', 'pnl': profit})
           send_telegram_message(f"✅ *Virtual BUY Target Hit*\nTP: {trade['tp']} | Profit: +${profit:.2f}\nNew Balance: ${virtual_balance:.2f}")
           hit = True
           break
         elif low <= trade['sl']:
-          loss = abs(trade['entry'] - trade['sl']) * lot_size * contract_size
+          loss = 4.0 * lot_size * contract_size
           virtual_balance -= loss
           closed_trades.append({'type': 'BUY', 'result': 'LOSS', 'pnl': -loss})
           send_telegram_message(f"❌ *Virtual BUY Stop Loss Hit*\nSL: {trade['sl']} | Loss: -${loss:.2f}\nNew Balance: ${virtual_balance:.2f}")
@@ -223,14 +223,14 @@ def track_virtual_trades(df_1m):
           break
       elif trade['type'] == 'SELL':
         if low <= trade['tp']:
-          profit = abs(trade['entry'] - trade['tp']) * lot_size * contract_size
+          profit = 8.0 * lot_size * contract_size
           virtual_balance += profit
           closed_trades.append({'type': 'SELL', 'result': 'WIN', 'pnl': profit})
           send_telegram_message(f"✅ *Virtual SELL Target Hit*\nTP: {trade['tp']} | Profit: +${profit:.2f}\nNew Balance: ${virtual_balance:.2f}")
           hit = True
           break
         elif high >= trade['sl']:
-          loss = abs(trade['sl'] - trade['entry']) * lot_size * contract_size
+          loss = 4.0 * lot_size * contract_size
           virtual_balance -= loss
           closed_trades.append({'type': 'SELL', 'result': 'LOSS', 'pnl': -loss})
           send_telegram_message(f"❌ *Virtual SELL Stop Loss Hit*\nSL: {trade['sl']} | Loss: -${loss:.2f}\nNew Balance: ${virtual_balance:.2f}")
@@ -257,7 +257,6 @@ def parse_trade_from_text(text, current_price):
       if nums and float(nums[-1]) > 1000:
         entry = float(nums[-1])
 
-  # Strictly enforce mathematically correct 1:2 Risk-Reward levels
   if t_type == 'BUY':
     sl = entry - 4.0
     tp = entry + 8.0
@@ -274,8 +273,8 @@ def run_bot_task():
 
   track_virtual_trades(df_1m)
 
-  mpf.plot(df_1m, type="candle", style="charles", savefile="chart_1m.png")
-  mpf.plot(df_15m, type="candle", style="charles", savefile="chart_15m.png")
+  mpf.plot(df_1m, type="candle", style="charles", savefig=dict(fname="chart_1m.png", dpi=100))
+  mpf.plot(df_15m, type="candle", style="charles", savefig=dict(fname="chart_15m.png", dpi=100))
 
   client = genai.Client(api_key=GEMINI_API_KEY)
   image_1m = client.files.upload(file="chart_1m.png")
