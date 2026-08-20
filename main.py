@@ -129,7 +129,7 @@ def telegram_webhook():
       chat_id = str(update["message"]["chat"]["id"])
       
       if chat_id == str(TELEGRAM_CHAT_ID):
-        current_price = latest_live_price if latest_live_price > 0 else 4300.0
+        current_price = latest_live_price if latest_live_price > 0 else 4500.0
         if msg_text == "/balance":
           send_telegram_message(f"💰 *Current Virtual Balance:* ${virtual_balance:.2f}")
         elif msg_text == "/price":
