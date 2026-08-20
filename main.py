@@ -6,7 +6,7 @@ import pandas as pd
 from flask import Flask, request
 from google import genai
 from telegram import Bot
-
+ 
 # Initialize Flask App
 app = Flask(__name__)
 
