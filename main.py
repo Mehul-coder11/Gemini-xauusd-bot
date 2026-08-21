@@ -1,6 +1,4 @@
 import os
-import time
-import threading
 import requests
 import pandas as pd
 from flask import Flask, request
@@ -33,7 +31,8 @@ def send_telegram_message(text):
             "text": text,
             "parse_mode": "Markdown"
         }
-        requests.post(url, json=payload)
+        res = requests.post(url, json=payload, timeout=5)
+        print("Telegram response:", res.status_code, res.text)
     except Exception as e:
         print("Telegram Send Error:", e)
 
@@ -99,13 +98,14 @@ def get_bot_report(current_price):
 
 def execute_bot_logic():
     try:
+        print("Cron triggered /run: Executing bot analysis...")
         current_price = get_live_binance_price()
         if current_price == 0.0:
             current_price = latest_live_price
             
         df_1m = fetch_binance_klines("1min")
         
-        # Ask Gemini to evaluate the market data
+        # Ask Gemini to evaluate market data
         prompt = f"Analyze XAUUSD (PAXGUSDT) current price {current_price} and recent candles. Should we BUY, SELL, or HOLD? Give a short reason."
         response = client.models.generate_content(
             model="gemini-2.5-flash",
@@ -113,7 +113,7 @@ def execute_bot_logic():
         )
         decision = response.text.strip()
         
-        # Send trade signal/evaluation directly to your Telegram chat
+        # Send the generated trade advice to Telegram
         send_telegram_message(f"🤖 *Gemini Signal Update*\nPrice: ${current_price:.2f}\nAnalysis: {decision}")
     except Exception as e:
         print("Bot Logic Error:", e)
@@ -125,7 +125,7 @@ def home():
 @app.route("/run")
 def trigger_run():
     execute_bot_logic()
-    return "Background task running successfully.", 200
+    return "Cron job executed successfully.", 200
 
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
@@ -157,13 +157,6 @@ def telegram_webhook():
         print("Webhook Error:", e)
     return "OK", 200
 
-def run_background_loop():
-    while True:
-        execute_bot_logic()
-        time.sleep(600)  # Runs every 10 minutes as a background backup loop
-
 if __name__ == "__main__":
-    threading.Thread(target=run_background_loop, daemon=True).start()
-    
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
