@@ -20,7 +20,7 @@ from google.genai import types
 # 1. CONFIGURATION & ENVIRONMENT VARIABLES
 # ---------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
+ 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
