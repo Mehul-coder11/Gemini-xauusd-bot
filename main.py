@@ -1,419 +1,213 @@
-import matplotlib.pyplot as plt
 import os
 import io
-import json
 import time
-import logging
-import threading
 import requests
 import pandas as pd
-import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import mplfinance as mpf
-from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
-from flask import Flask, request, jsonify
+import ta
+from flask import Flask, request
 from google import genai
-from google.genai import types
 
-# ---------------------------------------------------------
-# 1. CONFIGURATION
-# ---------------------------------------------------------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
-PORT = int(os.getenv("PORT", 10000))
-
-ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 app = Flask(__name__)
-STATE_FILE = "trading_state.json"
 
-HTTP_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "application/json"
-}
+# Credentials & Configurations
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7963353406:AAF-6oU40pXzZ3D6w7c1E450Q-U50607")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "-100234567890")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# ---------------------------------------------------------
-# 2. VIRTUAL ACCOUNT & PERSISTENCE
-# ---------------------------------------------------------
-def load_state():
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            logging.error(f"Error loading state: {e}")
-    return {
-        "balance": 20.0,
-        "leverage": 1000,
-        "active_trade": None, 
-        "history": []
-    }
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-def save_state(state):
-    try:
-        with open(STATE_FILE, 'w') as f:
-            json.dump(state, f, indent=4)
-    except Exception as e:
-        logging.error(f"Error saving state: {e}")
+# Global State Variables
+virtual_balance = 10000.0
+open_trades = []
+trade_history = []
+last_run_timestamp = 0
 
-app_state = load_state()
-
-# ---------------------------------------------------------
-# 3. TWELVE DATA REAL-TIME PRICE FETCHING
-# ---------------------------------------------------------
-def get_live_xauusd_price():
-    """Fetches real-time XAU/USD Spot Gold Price using Twelve Data API."""
-    if not TWELVE_DATA_API_KEY:
-        logging.error("TWELVE_DATA_API_KEY is missing from environment variables.")
-        return None
-
-    url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={TWELVE_DATA_API_KEY}"
-    try:
-        res = requests.get(url, headers=HTTP_HEADERS, timeout=5.0)
-        if res.status_code == 200:
-            data = res.json()
-            if "price" in data:
-                price = float(data["price"])
-                if price > 1000:
-                    return round(price, 2)
-    except Exception as e:
-        logging.error(f"Twelve Data Price Fetch Error: {e}")
-            
-    return None
-
-# ---------------------------------------------------------
-# 4. TELEGRAM INTEGRATION
-# ---------------------------------------------------------
-def send_telegram_message(text, photo_bytes=None, target_chat_id=None):
-    if not TELEGRAM_BOT_TOKEN:
-        return
-    chat = target_chat_id or TELEGRAM_CHAT_ID
-    if not chat:
-        return
+def send_telegram_message(text, photo_bytes=None):
     try:
         if photo_bytes:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             files = {'photo': ('chart.png', photo_bytes, 'image/png')}
-            data = {'chat_id': chat, 'caption': text, 'parse_mode': 'Markdown'}
-            requests.post(url, data=data, files=files, timeout=8)
+            data = {"chat_id": TELEGRAM_CHAT_ID, "caption": text, "parse_mode": "Markdown"}
+            requests.post(url, data=data, files=files, timeout=15)
         else:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            payload = {'chat_id': chat, 'text': text, 'parse_mode': 'Markdown'}
-            requests.post(url, json=payload, timeout=4)
+            payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
+            requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        logging.error(f"Telegram API Error: {e}")
+        print("Telegram Send Exception:", e)
 
-# ---------------------------------------------------------
-# 5. KLINE DATA & CHART GENERATION
-# ---------------------------------------------------------
-def fetch_and_process_data(interval_str="1min"):
-    if not TWELVE_DATA_API_KEY:
-        return None, None
-
-    url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval={interval_str}&outputsize=30&apikey={TWELVE_DATA_API_KEY}"
-    
+def get_live_binance_price():
     try:
-        res = requests.get(url, headers=HTTP_HEADERS, timeout=6.0)
-        if res.status_code == 200:
-            data = res.json()
-            if "values" in data:
-                rows = data["values"]
-                df = pd.DataFrame(rows)
-                df['datetime'] = pd.to_datetime(df['datetime'])
-                df.set_index('datetime', inplace=True)
-                df = df[['open', 'high', 'low', 'close']].astype(float)
-                df = df.sort_index()
-                
-                df['RSI'] = RSIIndicator(df['close'], window=14).rsi()
-                df['EMA_20'] = EMAIndicator(df['close'], window=20).ema_indicator()
-                df['EMA_50'] = EMAIndicator(df['close'], window=50).ema_indicator()
-                
-                latest_data = df.iloc[-1]
-                context = {
-                    "close": latest_data['close'],
-                    "rsi": round(latest_data['RSI'], 2) if not np.isnan(latest_data['RSI']) else 50.0,
-                    "ema_20": round(latest_data['EMA_20'], 2) if not np.isnan(latest_data['EMA_20']) else latest_data['close'],
-                    "ema_50": round(latest_data['EMA_50'], 2) if not np.isnan(latest_data['EMA_50']) else latest_data['close']
-                }
-                return df, context
+        url = "https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+        if "price" in data:
+            return float(data["price"])
     except Exception as e:
-        logging.error(f"Twelve Data Time Series fetch error: {e}")
-            
-    return None, None
+        print("Binance Live Price Error:", e)
+    return 0.0
 
-def generate_candlestick_chart(df, title):
-    plot_df = df.tail(20)
-    mc = mpf.make_marketcolors(up='g', down='r', edge='inherit', wick='inherit')
-    s = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', y_on_right=True)
+def fetch_and_prepare_data(interval):
+    binance_interval = "1m" if interval == "1min" else "15m"
+    url = f"https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=50"
+    res = requests.get(url).json()
     
-    ap = [
-        mpf.make_addplot(plot_df['EMA_20'], color='blue', width=1),
-        mpf.make_addplot(plot_df['EMA_50'], color='orange', width=1)
-    ]
+    data = []
+    for candle in res:
+        data.append({
+            "datetime": pd.to_datetime(int(candle[0]), unit='ms', origin='unix'),
+            "open": float(candle[1]),
+            "high": float(candle[2]),
+            "low": float(candle[3]),
+            "close": float(candle[4]),
+            "volume": float(candle[5])
+        })
+    df = pd.DataFrame(data)
+    df.set_index("datetime", inplace=True)
     
-    fig, ax = mpf.plot(plot_df, type='candle', style=s, addplot=ap, returnfig=True, figsize=(5, 2.5))
-    ax[0].set_title(title, fontsize=9, weight='bold')
-    
+    # Calculate indicators for liquidity & supply/demand clues
+    df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=14).rsi()
+    macd = ta.trend.MACD(df['close'])
+    df['macd'] = macd.macd()
+    df['sma_fast'] = ta.trend.SMAIndicator(df['close'], window=9).sma_indicator()
+    df['sma_slow'] = ta.trend.SMAIndicator(df['close'], window=21).sma_indicator()
+    return df
+
+def generate_chart_image(df, title):
     buf = io.BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight', dpi=70)
+    mpf.plot(df, type='candle', style='charles', volume=True, title=title, savefig=dict(fname=buf, format='png', dpi=100))
     buf.seek(0)
-    plt.close(fig)
-    return buf.getvalue()
+    return buf.read()
 
-# ---------------------------------------------------------
-# 6. CORE TRADING LOGIC
-# ---------------------------------------------------------
-def execute_trade_logic(manual_trigger=False, chat_id=None):
-    if app_state["active_trade"] and not manual_trigger:
-        return
-
-    current_price = get_live_xauusd_price()
-    if not current_price:
-        if manual_trigger and chat_id:
-            send_telegram_message("❌ Error fetching live price from Twelve Data.", target_chat_id=chat_id)
-        return
-
-    if manual_trigger and app_state["active_trade"]:
-        if chat_id:
-            send_telegram_message("⚠️ You already have an active trade running!", target_chat_id=chat_id)
-        return
-
-    df_1m, ctx_1m = fetch_and_process_data("1min")
-    df_15m, ctx_15m = fetch_and_process_data("15min")
-    
-    contents = []
-    if ctx_1m and ctx_15m:
-        prompt = f"""
-Assume you are a professional intraday trader analyzing live XAU/USD Spot Gold.
-Current Spot Price: {current_price}
-1m Indicators: RSI={ctx_1m['rsi']}, EMA20={ctx_1m['ema_20']}, EMA50={ctx_1m['ema_50']}
-15m Indicators: RSI={ctx_15m['rsi']}, EMA20={ctx_15m['ema_20']}, EMA50={ctx_15m['ema_50']}
-
-Provide a trade ONLY if confidence is 60%+; otherwise output NO TRADE.
-Rules:
-- Risk/Reward ratio 1:2 (TP must be double of SL)
-- Stop Loss <= $4
-- Take Profit >= $4
-
-OUTPUT STRICT FORMAT:
-TRADE: BUY (or SELL)
-ENTRY: [price]
-TP: [price]
-SL: [price]
-
-If no trade:
-NO TRADE
-"""
-        contents.append(prompt)
-    else:
-        if manual_trigger and chat_id:
-            send_telegram_message("❌ Error fetching technical data from Twelve Data.", target_chat_id=chat_id)
-        return
-
-    if df_1m is not None:
-        try:
-            img_1m = generate_candlestick_chart(df_1m, f"XAU/USD - ${current_price}")
-            contents.append(types.Part.from_bytes(data=img_1m, mime_type='image/png'))
-        except Exception as e:
-            logging.error(f"Chart Attachment Error: {e}")
-
+def execute_bot_logic():
+    global virtual_balance, last_run_timestamp
     try:
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=contents
+        current_time = time.time()
+        # Enforce 10 minute check interval restriction on run
+        if current_time - last_run_timestamp < 550 and last_run_timestamp != 0:
+            print("Run requested too soon, skipping...")
+            return
+        last_run_timestamp = current_time
+
+        print("Executing scheduled 10-minute bot analysis...")
+        current_price = get_live_binance_price()
+        if current_price == 0:
+            return
+
+        df_1m = fetch_and_prepare_data("1min")
+        df_15m = fetch_and_prepare_data("15m")
+
+        chart_1m_bytes = generate_chart_image(df_1m, "XAUUSD (PAXGUSDT) - 1 Min")
+        
+        # Check active trades against SL / TP rules with accurate PnL math
+        for t in list(open_trades):
+            hit_exit = False
+            exit_price = current_price
+            pnl_dollars = 0.0
+
+            if t['type'] == 'BUY':
+                if current_price <= t['sl']:
+                    exit_price = t['sl']
+                    pnl_dollars = (exit_price - t['entry']) * 10
+                    hit_exit = True
+                elif current_price >= t['tp']:
+                    exit_price = t['tp']
+                    pnl_dollars = (exit_price - t['entry']) * 10
+                    hit_exit = True
+            elif t['type'] == 'SELL':
+                if current_price >= t['sl']:
+                    exit_price = t['sl']
+                    pnl_dollars = (t['entry'] - exit_price) * 10
+                    hit_exit = True
+                elif current_price <= t['tp']:
+                    exit_price = t['tp']
+                    pnl_dollars = (t['entry'] - exit_price) * 10
+                    hit_exit = True
+
+            if hit_exit:
+                virtual_balance += pnl_dollars
+                trade_history.append({"type": t['type'], "entry": t['entry'], "exit": exit_price, "pnl": pnl_dollars})
+                open_trades.remove(t)
+                send_telegram_message(f"🚨 *Trade Closed by SL/TP ({t['type']})*\nExit Price: ${exit_price:.2f}\nRealized PnL: ${pnl_dollars:.2f}\nNew Balance: ${virtual_balance:.2f}")
+
+        # Gather Indicator Summary for Gemini Context
+        latest_1m = df_1m.iloc[-1]
+        latest_15m = df_15m.iloc[-1]
+        indicators_summary = (
+            f"1M RSI: {latest_1m['rsi']:.2f}, SMA9: {latest_1m['sma_fast']:.2f}, SMA21: {latest_1m['sma_slow']:.2f}\n"
+            f"15M RSI: {latest_15m['rsi']:.2f}, SMA9: {latest_15m['sma_fast']:.2f}, SMA21: {latest_15m['sma_slow']:.2f}"
         )
-        
-        reply = response.text.strip().upper()
-        
-        if "TRADE: BUY" in reply or "TRADE: SELL" in reply:
-            lines = reply.split('\n')
-            t_type = "BUY" if "BUY" in reply else "SELL"
-            entry_p = current_price
-            tp_p, sl_p = 0.0, 0.0
-            
-            for line in lines:
-                if "ENTRY:" in line: 
-                    try: entry_p = float(line.split(':')[1].strip())
-                    except: pass
-                if "TP:" in line: 
-                    try: tp_p = float(line.split(':')[1].strip())
-                    except: pass
-                if "SL:" in line: 
-                    try: sl_p = float(line.split(':')[1].strip())
-                    except: pass
-            
-            position_size = (app_state["balance"] * app_state["leverage"]) / (entry_p if entry_p > 0 else 1)
-            
-            app_state["active_trade"] = {
-                "type": t_type, "entry": entry_p, "tp": tp_p, "sl": sl_p, 
-                "size": position_size, "open_pnl": 0.0, "current_price": current_price
-            }
-            save_state(app_state)
-            
-            msg = (f"🟢 *NEW TRADE EXECUTED*\n\n"
-                   f"Action: *{t_type} XAUUSD*\n"
-                   f"Current Price: `${current_price}`\n"
-                   f"Entry Price: `${entry_p}`\n"
-                   f"Take Profit: `${tp_p}`\n"
-                   f"Stop Loss: `${sl_p}`")
-            send_telegram_message(msg)
+
+        prompt = (
+            f"Analyze XAUUSD current price {current_price}. Indicators:\n{indicators_summary}\n"
+            "Evaluate liquidity, supply/demand, order blocks, market sweeps, and volume. "
+            "Return a decision starting with BUY, SELL, or HOLD, followed by your reasoning, "
+            "and suggest explicit SL (Stop Loss) and TP (Take Profit) levels."
+        )
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[prompt, client.types.Part.from_bytes(data=chart_1m_bytes, mime_type="image/png")]
+        )
+        decision = response.text.strip()
+        decision_upper = decision.upper()
+
+        if "BUY" in decision_upper and len(open_trades) < 2:
+            sl = current_price - 3.0
+            tp = current_price + 5.0
+            open_trades.append({"type": "BUY", "entry": current_price, "sl": sl, "tp": tp})
+            send_telegram_message(f"🟢 *New BUY Position Opened*\nPrice: ${current_price:.2f}\nSL: ${sl:.2f} | TP: ${tp:.2f}\n\n{decision}", chart_1m_bytes)
+        elif "SELL" in decision_upper and len(open_trades) < 2:
+            sl = current_price + 3.0
+            tp = current_price - 5.0
+            open_trades.append({"type": "SELL", "entry": current_price, "sl": sl, "tp": tp})
+            send_telegram_message(f"🔴 *New SELL Position Opened*\nPrice: ${current_price:.2f}\nSL: ${sl:.2f} | TP: ${tp:.2f}\n\n{decision}", chart_1m_bytes)
         else:
-            if manual_trigger and chat_id:
-                send_telegram_message(f"🤖 *Gemini Scan Result:* No high-confidence setup found right now.\n\nRaw reply:\n`{reply}`", target_chat_id=chat_id)
+            send_telegram_message(f"🤖 *Gemini Market Update (HOLD)*\nPrice: ${current_price:.2f}\n{decision}", chart_1m_bytes)
+
     except Exception as e:
-        logging.error(f"Gemini API Error: {e}")
-        if manual_trigger and chat_id:
-            send_telegram_message("❌ Error connecting to Gemini API.", target_chat_id=chat_id)
+        print("Bot Logic Error:", e)
 
-# ---------------------------------------------------------
-# 7. BACKGROUND THREADS (Safe 3-minute check interval)
-# ---------------------------------------------------------
-def background_trade_monitor():
-    while True:
-        try:
-            trade = app_state.get("active_trade")
-            if trade:
-                current_price = get_live_xauusd_price()
-                if not current_price:
-                    time.sleep(10)
-                    continue
+@app.route("/")
+def home():
+    return "Gemini XAUUSD Trading Bot is Active!", 200
 
-                entry = trade["entry"]
-                t_type = trade["type"]
-                tp = trade["tp"]
-                sl = trade["sl"]
-                size = trade["size"]
-                
-                if t_type == "BUY":
-                    pnl = (current_price - entry) * size
-                    hit_tp = current_price >= tp
-                    hit_sl = current_price <= sl
-                else:
-                    pnl = (entry - current_price) * size
-                    hit_tp = current_price <= tp
-                    hit_sl = current_price >= sl
-                
-                trade["open_pnl"] = round(pnl, 2)
-                trade["current_price"] = current_price
-                save_state(app_state)
-                
-                if hit_tp or hit_sl:
-                    result = "PROFIT (TP) 🎯" if hit_tp else "LOSS (SL) 🛑"
-                    app_state["balance"] += pnl
-                    
-                    closed_trade = trade.copy()
-                    closed_trade["result"] = result
-                    closed_trade["exit_price"] = current_price
-                    closed_trade["final_pnl"] = round(pnl, 2)
-                    closed_trade.pop("open_pnl", None)
-                    closed_trade.pop("current_price", None)
-                    
-                    app_state["history"].append(closed_trade)
-                    app_state["active_trade"] = None
-                    save_state(app_state)
-                    
-                    msg = (f"🔔 *TRADE CLOSED: {result}*\n\n"
-                           f"Type: {t_type}\n"
-                           f"Entry: `${entry}`\n"
-                           f"Exit Price: `${current_price}`\n"
-                           f"Net PnL: `${pnl:.2f}`\n"
-                           f"New Balance: `${app_state['balance']:.2f}`")
-                    send_telegram_message(msg)
-        except Exception as e:
-            logging.error(f"Monitor Thread Error: {e}")
-        time.sleep(180) # Checked every 3 minutes to preserve free tier limits
+@app.route("/run")
+def trigger_run():
+    execute_bot_logic()
+    return "Cron job processed successfully.", 200
 
-def scheduled_market_scanner():
-    while True:
-        try:
-            if not app_state.get("active_trade"):
-                execute_trade_logic(manual_trigger=False)
-        except Exception as e:
-            logging.error(f"Scanner Error: {e}")
-        time.sleep(600) # Scanned every 10 minutes automatically
-
-@app.route('/run', methods=['GET', 'POST'])
-def run_cron_bot():
-    execute_trade_logic(manual_trigger=False)
-    return jsonify({"status": "Triggered"}), 200
-
-# ---------------------------------------------------------
-# 8. TELEGRAM COMMANDS & HEALTH
-# ---------------------------------------------------------
-@app.route('/webhook', methods=['POST'])
-@app.route('/telegram_webhook', methods=['POST'])
+@app.route("/webhook", methods=["POST"])
 def telegram_webhook():
-    update = request.get_json()
-    if not update or 'message' not in update:
-        return jsonify({"status": "ok"}), 200
-
-    msg_obj = update['message']
-    chat_id = msg_obj['chat']['id']
-    text = msg_obj.get('text', '').lower().strip()
-
-    if text.startswith('/balance'):
-        bal = app_state['balance']
-        trade = app_state.get('active_trade')
-        eq = bal + (trade['open_pnl'] if trade else 0.0)
-        send_telegram_message(f"💰 *Balance:* `${bal:.2f}`\n*Equity:* `${eq:.2f}`", target_chat_id=chat_id)
-        
-    elif text.startswith('/price'):
-        price = get_live_xauusd_price()
-        if price:
-            send_telegram_message(f"📈 *XAU/USD Live Spot Price:* `${price}`", target_chat_id=chat_id)
-        else:
-            send_telegram_message("❌ Error fetching live price from Twelve Data.", target_chat_id=chat_id)
-        
-    elif text.startswith('/active'):
-        trade = app_state.get('active_trade')
-        if trade:
-            current_price = get_live_xauusd_price()
-            if current_price:
-                entry = trade["entry"]
-                t_type = trade["type"]
-                size = trade["size"]
-                pnl = (current_price - entry) * size if t_type == "BUY" else (entry - current_price) * size
-                trade["open_pnl"] = round(pnl, 2)
-                trade["current_price"] = current_price
-                save_state(app_state)
+    try:
+        update = request.json
+        if "message" in update and "text" in update["message"]:
+            msg_text = update["message"]["text"].strip().lower()
+            chat_id = str(update["message"]["chat"]["id"])
             
-            send_telegram_message(f"📊 *Active Trade: {trade['type']}*\n"
-                                  f"Entry Price: `${trade['entry']}`\n"
-                                  f"Current Price: `${trade.get('current_price', 0)}`\n"
-                                  f"Take Profit: `${trade['tp']}`\n"
-                                  f"Stop Loss: `${trade['sl']}`\n"
-                                  f"Live PnL: `${trade.get('open_pnl', 0):.2f}`", target_chat_id=chat_id)
-        else:
-            send_telegram_message("No active trades currently.", target_chat_id=chat_id)
+            if chat_id == str(TELEGRAM_CHAT_ID):
+                if msg_text == "/price":
+                    live_p = get_live_binance_price()
+                    send_telegram_message(f"⚡ *Live Binance Price:* ${live_p:.2f}")
+                elif msg_text in ["/open", "/active"]:
+                    live_p = get_live_binance_price()
+                    if not open_trades:
+                        send_telegram_message("📂 *Active Trades:* None")
+                    else:
+                        details = "📂 *Active Trades:*\n"
+                        for t in open_trades:
+                            pnl = (live_p - t['entry']) * 10 if t['type'] == 'BUY' else (t['entry'] - live_p) * 10
+                            details += f"• {t['type']} @ ${t['entry']:.2f} | SL: ${t['sl']} | TP: ${t['tp']} | PnL: ${pnl:.2f}\n"
+                        send_telegram_message(details)
+                elif msg_text == "/balance":
+                    send_telegram_message(f"💰 *Virtual Balance:* ${virtual_balance:.2f}")
+    except Exception as e:
+        print("Webhook Error:", e)
+    return "OK", 200
 
-    elif text.startswith('/trade'):
-        send_telegram_message("🔍 *Analyzing market and requesting Gemini trade setup...*", target_chat_id=chat_id)
-        threading.Thread(target=execute_trade_logic, args=(True, chat_id)).start()
-            
-    elif text.startswith('/history'):
-        hist = app_state["history"][-5:]
-        if hist:
-            msg = "📜 *Last Trades:*\n" + "\n".join([f"• {t['type']} | {t['result']} | PnL: `${t['final_pnl']:.2f}`" for t in hist])
-        else:
-            msg = "📜 No trade history available."
-        send_telegram_message(msg, target_chat_id=chat_id)
-
-    elif text.startswith('/start'):
-        send_telegram_message("👋 *Welcome to XAU/USD Bot!*\nCommands:\n/price - Get live price\n/active - View active trade & live PnL\n/trade - Manually trigger Gemini trade scan\n/balance - Check balance & equity\n/history - View past trades", target_chat_id=chat_id)
-
-    return jsonify({"status": "ok"}), 200
-
-@app.route('/', methods=['GET', 'HEAD'])
-def health():
-    return "XAUUSD Twelve Data Bot Active", 200
-
-if __name__ == '__main__':
-    send_telegram_message("🚀 *xauusd bot has started successfully*")
-    threading.Thread(target=background_trade_monitor, daemon=True).start()
-    threading.Thread(target=scheduled_market_scanner, daemon=True).start()
-    app.run(host='0.0.0.0', port=PORT, use_reloader=False)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
