@@ -88,7 +88,7 @@ def process_and_analyze():
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.0-flash-lite",
+            model="gemini-3.5-flash-lite",
             contents=[
                 full_prompt,
                 types.Part.from_bytes(data=chart_1m_bytes, mime_type="image/png"),
