@@ -56,7 +56,7 @@ def load_state():
 
 def save_state(state):
     try:
-        with open(STATE_FILE, 'w' ) as f:
+        with open(STATE_FILE, 'w') as f:
             json.dump(state, f, indent=4)
     except Exception as e:
         logging.error(f"Error saving state: {e}")
@@ -112,7 +112,6 @@ def send_telegram_message(text, photo_bytes=None, target_chat_id=None):
 # 5. KLINE DATA & CHART GENERATION
 # ---------------------------------------------------------
 def fetch_and_process_data(interval_str="1min"):
-    """Fetches historical gold candles from Twelve Data for indicator analysis."""
     if not TWELVE_DATA_API_KEY:
         return None, None
 
@@ -128,7 +127,7 @@ def fetch_and_process_data(interval_str="1min"):
                 df['datetime'] = pd.to_datetime(df['datetime'])
                 df.set_index('datetime', inplace=True)
                 df = df[['open', 'high', 'low', 'close']].astype(float)
-                df = df.sort_index() # Twelve Data returns latest first, sort chronological
+                df = df.sort_index()
                 
                 df['RSI'] = RSIIndicator(df['close'], window=14).rsi()
                 df['EMA_20'] = EMAIndicator(df['close'], window=20).ema_indicator()
@@ -169,12 +168,19 @@ def generate_candlestick_chart(df, title):
 # ---------------------------------------------------------
 # 6. CORE TRADING LOGIC
 # ---------------------------------------------------------
-def execute_trade_logic():
-    if app_state["active_trade"]:
+def execute_trade_logic(manual_trigger=False, chat_id=None):
+    if app_state["active_trade"] and not manual_trigger:
         return
 
     current_price = get_live_xauusd_price()
     if not current_price:
+        if manual_trigger and chat_id:
+            send_telegram_message("❌ Error fetching live price from Twelve Data.", target_chat_id=chat_id)
+        return
+
+    if manual_trigger and app_state["active_trade"]:
+        if chat_id:
+            send_telegram_message("⚠️ You already have an active trade running!", target_chat_id=chat_id)
         return
 
     df_1m, ctx_1m = fetch_and_process_data("1min")
@@ -205,6 +211,8 @@ NO TRADE
 """
         contents.append(prompt)
     else:
+        if manual_trigger and chat_id:
+            send_telegram_message("❌ Error fetching technical data from Twelve Data.", target_chat_id=chat_id)
         return
 
     if df_1m is not None:
@@ -254,11 +262,16 @@ NO TRADE
                    f"Take Profit: `${tp_p}`\n"
                    f"Stop Loss: `${sl_p}`")
             send_telegram_message(msg)
+        else:
+            if manual_trigger and chat_id:
+                send_telegram_message(f"🤖 *Gemini Scan Result:* No high-confidence setup found right now.\n\nRaw reply:\n`{reply}`", target_chat_id=chat_id)
     except Exception as e:
         logging.error(f"Gemini API Error: {e}")
+        if manual_trigger and chat_id:
+            send_telegram_message("❌ Error connecting to Gemini API.", target_chat_id=chat_id)
 
 # ---------------------------------------------------------
-# 7. BACKGROUND THREADS
+# 7. BACKGROUND THREADS (Safe 3-minute check interval)
 # ---------------------------------------------------------
 def background_trade_monitor():
     while True:
@@ -267,7 +280,7 @@ def background_trade_monitor():
             if trade:
                 current_price = get_live_xauusd_price()
                 if not current_price:
-                    time.sleep(3)
+                    time.sleep(10)
                     continue
 
                 entry = trade["entry"]
@@ -313,20 +326,20 @@ def background_trade_monitor():
                     send_telegram_message(msg)
         except Exception as e:
             logging.error(f"Monitor Thread Error: {e}")
-        time.sleep(3)
+        time.sleep(180) # Checked every 3 minutes to preserve free tier limits
 
 def scheduled_market_scanner():
     while True:
         try:
             if not app_state.get("active_trade"):
-                execute_trade_logic()
+                execute_trade_logic(manual_trigger=False)
         except Exception as e:
             logging.error(f"Scanner Error: {e}")
-        time.sleep(60)
+        time.sleep(600) # Scanned every 10 minutes automatically
 
 @app.route('/run', methods=['GET', 'POST'])
 def run_cron_bot():
-    execute_trade_logic()
+    execute_trade_logic(manual_trigger=False)
     return jsonify({"status": "Triggered"}), 200
 
 # ---------------------------------------------------------
@@ -352,16 +365,35 @@ def telegram_webhook():
     elif text.startswith('/price'):
         price = get_live_xauusd_price()
         if price:
-            send_telegram_message(f"📈 *XAU/USD Live Spot Price (Twelve Data):* `${price}`", target_chat_id=chat_id)
+            send_telegram_message(f"📈 *XAU/USD Live Spot Price:* `${price}`", target_chat_id=chat_id)
         else:
-            send_telegram_message("❌ Error fetching live price.", target_chat_id=chat_id)
+            send_telegram_message("❌ Error fetching live price from Twelve Data.", target_chat_id=chat_id)
         
     elif text.startswith('/active'):
         trade = app_state.get('active_trade')
         if trade:
-            send_telegram_message(f"📊 *Trade:* {trade['type']}\nEntry: `${trade['entry']}`\nCurrent: `${trade.get('current_price', 0)}`\nPnL: `${trade.get('open_pnl', 0):.2f}`", target_chat_id=chat_id)
+            current_price = get_live_xauusd_price()
+            if current_price:
+                entry = trade["entry"]
+                t_type = trade["type"]
+                size = trade["size"]
+                pnl = (current_price - entry) * size if t_type == "BUY" else (entry - current_price) * size
+                trade["open_pnl"] = round(pnl, 2)
+                trade["current_price"] = current_price
+                save_state(app_state)
+            
+            send_telegram_message(f"📊 *Active Trade: {trade['type']}*\n"
+                                  f"Entry Price: `${trade['entry']}`\n"
+                                  f"Current Price: `${trade.get('current_price', 0)}`\n"
+                                  f"Take Profit: `${trade['tp']}`\n"
+                                  f"Stop Loss: `${trade['sl']}`\n"
+                                  f"Live PnL: `${trade.get('open_pnl', 0):.2f}`", target_chat_id=chat_id)
         else:
-            send_telegram_message("No active trades.", target_chat_id=chat_id)
+            send_telegram_message("No active trades currently.", target_chat_id=chat_id)
+
+    elif text.startswith('/trade'):
+        send_telegram_message("🔍 *Analyzing market and requesting Gemini trade setup...*", target_chat_id=chat_id)
+        threading.Thread(target=execute_trade_logic, args=(True, chat_id)).start()
             
     elif text.startswith('/history'):
         hist = app_state["history"][-5:]
@@ -372,7 +404,7 @@ def telegram_webhook():
         send_telegram_message(msg, target_chat_id=chat_id)
 
     elif text.startswith('/start'):
-        send_telegram_message("👋 *Welcome to XAU/USD Twelve Data Bot!*\nCommands: /price, /balance, /active, /history", target_chat_id=chat_id)
+        send_telegram_message("👋 *Welcome to XAU/USD Bot!*\nCommands:\n/price - Get live price\n/active - View active trade & live PnL\n/trade - Manually trigger Gemini trade scan\n/balance - Check balance & equity\n/history - View past trades", target_chat_id=chat_id)
 
     return jsonify({"status": "ok"}), 200
 
@@ -381,7 +413,7 @@ def health():
     return "XAUUSD Twelve Data Bot Active", 200
 
 if __name__ == '__main__':
-    send_telegram_message("🚀 *xauusd bot has started with Twelve Data*")
+    send_telegram_message("🚀 *xauusd bot has started successfully*")
     threading.Thread(target=background_trade_monitor, daemon=True).start()
     threading.Thread(target=scheduled_market_scanner, daemon=True).start()
     app.run(host='0.0.0.0', port=PORT, use_reloader=False)
