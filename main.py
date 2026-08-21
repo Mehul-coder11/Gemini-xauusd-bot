@@ -31,11 +31,9 @@ ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 app = Flask(__name__)
 STATE_FILE = "trading_state.json"
 
-# Full browser spoofing headers to avoid Cloudflare/Binance hosting block
 HTTP_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json",
-    "Accept-Language": "en-US,en;q=0.9"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/json"
 }
 
 # ---------------------------------------------------------
@@ -65,29 +63,26 @@ def save_state(state):
 app_state = load_state()
 
 # ---------------------------------------------------------
-# 3. RELIABLE MULTI-ENDPOINT LIVE PRICE FETCHING
+# 3. HIGH-SPEED DIRECT PRICE FETCHING (ANTI-BLOCK)
 # ---------------------------------------------------------
 def get_binance_live_price():
-    """Fetches live PAXG (Gold) spot price with reliable fallbacks if primary Binance endpoints block cloud hosting IPs."""
+    """Tries primary exchanges direct & fast to eliminate caching and host blocking."""
     endpoints = [
-        "https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT",
-        "https://api1.binance.com/api/v3/ticker/price?symbol=PAXGUSDT",
-        "https://api2.binance.com/api/v3/ticker/price?symbol=PAXGUSDT",
-        "https://api3.binance.com/api/v3/ticker/price?symbol=PAXGUSDT",
-        "https://api.coingecko.com/api/v3/simple/price?ids=pax-gold&vs_currencies=usd"
+        ("https://api.mexc.com/api/v3/ticker/price?symbol=PAXGUSDT", lambda d: float(d["price"])),
+        ("https://api.binance.us/api/v3/ticker/price?symbol=PAXGUSDT", lambda d: float(d["price"])),
+        ("https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT", lambda d: float(d["price"])),
+        ("https://api.coingecko.com/api/v3/simple/price?ids=pax-gold&vs_currencies=usd", lambda d: float(d["pax-gold"]["usd"]))
     ]
     
-    for url in endpoints:
+    for url, parser in endpoints:
         try:
-            res = requests.get(url, headers=HTTP_HEADERS, timeout=5)
+            res = requests.get(url, headers=HTTP_HEADERS, timeout=2.5)
             if res.status_code == 200:
-                data = res.json()
-                if "price" in data:
-                    return float(data["price"])
-                elif "pax-gold" in data and "usd" in data["pax-gold"]:
-                    return float(data["pax-gold"]["usd"])
+                price = parser(res.json())
+                if price > 0:
+                    return price
         except Exception as e:
-            logging.error(f"Price fetch error for {url}: {e}")
+            logging.error(f"Price fetch failed for {url}: {e}")
             
     return None
 
@@ -105,30 +100,27 @@ def send_telegram_message(text, photo_bytes=None, target_chat_id=None):
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             files = {'photo': ('chart.png', photo_bytes, 'image/png')}
             data = {'chat_id': chat, 'caption': text, 'parse_mode': 'Markdown'}
-            requests.post(url, data=data, files=files, timeout=15)
+            requests.post(url, data=data, files=files, timeout=10)
         else:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {'chat_id': chat, 'text': text, 'parse_mode': 'Markdown'}
-            requests.post(url, json=payload, timeout=10)
+            requests.post(url, json=payload, timeout=5)
     except Exception as e:
         logging.error(f"Telegram API Error: {e}")
 
 # ---------------------------------------------------------
-# 5. BINANCE KLINE DATA & CHART GENERATION
+# 5. FAST KLINE DATA & OPTIMIZED CHART GENERATION
 # ---------------------------------------------------------
 def fetch_and_process_data(interval):
-    """Fetches OHLCV candlestick data directly with fallback mirrors."""
     binance_interval = interval.replace('min', 'm')
-    
     urls = [
-        f"https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=60",
-        f"https://api1.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=60",
-        f"https://api2.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=60"
+        f"https://api.mexc.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=40",
+        f"https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=40"
     ]
     
     for url in urls:
         try:
-            res = requests.get(url, headers=HTTP_HEADERS, timeout=5)
+            res = requests.get(url, headers=HTTP_HEADERS, timeout=3)
             if res.status_code != 200:
                 continue
                 
@@ -165,20 +157,20 @@ def fetch_and_process_data(interval):
     return None, None
 
 def generate_candlestick_chart(df, title):
-    plot_df = df.tail(40)
+    plot_df = df.tail(30)
     mc = mpf.make_marketcolors(up='g', down='r', edge='inherit', wick='inherit', volume='in')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', y_on_right=True)
     
     ap = [
-        mpf.make_addplot(plot_df['EMA_20'], color='blue', width=1.5),
-        mpf.make_addplot(plot_df['EMA_50'], color='orange', width=1.5)
+        mpf.make_addplot(plot_df['EMA_20'], color='blue', width=1),
+        mpf.make_addplot(plot_df['EMA_50'], color='orange', width=1)
     ]
     
-    fig, ax = mpf.plot(plot_df, type='candle', style=s, addplot=ap, returnfig=True, figsize=(8, 5))
-    ax[0].set_title(title, fontsize=12, weight='bold')
+    fig, ax = mpf.plot(plot_df, type='candle', style=s, addplot=ap, returnfig=True, figsize=(6, 3.5))
+    ax[0].set_title(title, fontsize=10, weight='bold')
     
     buf = io.BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+    fig.savefig(buf, format='png', bbox_inches='tight', dpi=80)
     buf.seek(0)
     plt.close(fig)
     return buf.getvalue()
@@ -244,7 +236,7 @@ def background_trade_monitor():
         time.sleep(2)
 
 # ---------------------------------------------------------
-# 7. CRON TRIGGER ENDPOINT & GEMINI
+# 7. CRON TRIGGER ENDPOINT & FAST GEMINI
 # ---------------------------------------------------------
 @app.route('/run', methods=['GET', 'POST'])
 def run_cron_bot():
@@ -252,33 +244,34 @@ def run_cron_bot():
         return jsonify({"status": "ignored", "message": "Active trade running."}), 200
 
     current_binance_price = get_binance_live_price()
-    
     price_display = f"`${current_binance_price}`" if current_binance_price else "Unavailable"
+    
     send_telegram_message(
-        f"📡 *Sending Data to Gemini API...*\n"
-        f"💰 *Current Gold Price:* {price_display}"
+        f"📡 *Analyzing Market...*\n"
+        f"💰 *Current Price:* {price_display}"
     )
 
     df_1m, ctx_1m = fetch_and_process_data('1min')
     df_15m, ctx_15m = fetch_and_process_data('15min')
     
     contents = []
-    
     if ctx_1m and ctx_15m:
         prompt = f"""
-Assume you are a professional intraday trader and this is the data of live xauusd, with 1 minute chart and 15 minute chart please analyse it carefully ,and guve me a trade in xauusd but guve trade only when you have confidence of 60 to 70 percent or more otherwise say no trade, and when there is a trade then also tell what to do like buy or sell and what is the current price and at what price to enter the trade and what should be the take profit and sl, always keep risk reward ratio to 1 ratio 2 which means to should be double of sl and teh and only guve trades in which sl should not be more than 4 dollars and the trades in which has a minimum tp of 4 dollars or more, only guve intraday trades and only guve tp which will be achieved surely before today market close, and your main objective is to give profitable trades and grow the urers capital and the give him net gain.
-
+Assume you are a professional intraday trader and this is the data of live xauusd.
 Current Price: {current_binance_price}
-Indicators (1m): RSI={ctx_1m['rsi']}, EMA20={ctx_1m['ema_20']}, EMA50={ctx_1m['ema_50']}
-Indicators (15m): RSI={ctx_15m['rsi']}, EMA20={ctx_15m['ema_20']}, EMA50={ctx_15m['ema_50']}
+1m Context: RSI={ctx_1m['rsi']}, EMA20={ctx_1m['ema_20']}, EMA50={ctx_1m['ema_50']}
+15m Context: RSI={ctx_15m['rsi']}, EMA20={ctx_15m['ema_20']}, EMA50={ctx_15m['ema_50']}
 
-OUTPUT STRICT FORMAT (No analysis text, no reasoning):
+Provide a trade ONLY if confidence is 60%+; otherwise NO TRADE.
+Risk/Reward 1:2. SL <= $4, TP >= $4.
+
+OUTPUT STRICT FORMAT:
 TRADE: BUY (or SELL)
 ENTRY: [price]
 TP: [price]
 SL: [price]
 
-If no confidence, output strictly:
+If no trade:
 NO TRADE
 """
         contents.append(prompt)
@@ -288,10 +281,8 @@ NO TRADE
 
     if df_1m is not None and df_15m is not None:
         try:
-            img_1m = generate_candlestick_chart(df_1m, f"1m Chart - Price: ${current_binance_price}")
-            img_15m = generate_candlestick_chart(df_15m, f"15m Chart - Price: ${current_binance_price}")
+            img_1m = generate_candlestick_chart(df_1m, f"1m Chart - ${current_binance_price}")
             contents.append(types.Part.from_bytes(data=img_1m, mime_type='image/png'))
-            contents.append(types.Part.from_bytes(data=img_15m, mime_type='image/png'))
         except Exception as e:
             logging.error(f"Chart Attachment Error: {e}")
 
@@ -345,7 +336,7 @@ NO TRADE
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ---------------------------------------------------------
-# 8. TELEGRAM COMMANDS & WEBHOOKS
+# 8. TELEGRAM COMMANDS
 # ---------------------------------------------------------
 @app.route('/webhook', methods=['POST'])
 @app.route('/telegram_webhook', methods=['POST'])
@@ -367,9 +358,9 @@ def telegram_webhook():
     elif text.startswith('/price'):
         price = get_binance_live_price()
         if price:
-            send_telegram_message(f"📈 *Live Gold (PAXG/USDT):* `${price}`", target_chat_id=chat_id)
+            send_telegram_message(f"📈 *Live Price:* `${price}`", target_chat_id=chat_id)
         else:
-            send_telegram_message("❌ *Error fetching live price.* Check host IP restrictions.", target_chat_id=chat_id)
+            send_telegram_message("❌ Error fetching live price.", target_chat_id=chat_id)
         
     elif text.startswith('/active'):
         trade = app_state.get('active_trade')
@@ -387,7 +378,7 @@ def telegram_webhook():
         send_telegram_message(msg, target_chat_id=chat_id)
 
     elif text.startswith('/start'):
-        send_telegram_message("👋 *Welcome to XAU/USD Bot!*\nAvailable commands: /price, /balance, /active, /history", target_chat_id=chat_id)
+        send_telegram_message("👋 *Welcome to XAU/USD Bot!*\nCommands: /price, /balance, /active, /history", target_chat_id=chat_id)
 
     return jsonify({"status": "ok"}), 200
 
@@ -398,5 +389,4 @@ def health():
 if __name__ == '__main__':
     send_telegram_message("🚀 *xauusd bot has started*")
     threading.Thread(target=background_trade_monitor, daemon=True).start()
-    
     app.run(host='0.0.0.0', port=PORT, use_reloader=False)
