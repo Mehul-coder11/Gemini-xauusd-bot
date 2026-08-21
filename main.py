@@ -87,8 +87,9 @@ def process_and_analyze():
     full_prompt = f"Live Price: {current_price}\n\n" + PROMPT_TEXT
 
     try:
+        # Model set to gemini-2.0-flash-lite
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-2.0-flash-lite",
             contents=[
                 full_prompt,
                 types.Part.from_bytes(data=chart_1m_bytes, mime_type="image/png"),
@@ -100,6 +101,12 @@ def process_and_analyze():
     except Exception as e:
         print("Gemini API Error:", e)
         send_telegram_message(f"Error generating analysis: {str(e)}")
+
+def notify_startup():
+    send_telegram_message("🚀 XAUUSD Analysis Bot has been started and is ready for triggers!")
+
+# Send start message as soon as the script loads
+notify_startup()
 
 @app.route("/")
 def home():
