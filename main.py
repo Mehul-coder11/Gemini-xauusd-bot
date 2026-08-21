@@ -5,6 +5,7 @@ import json
 import time
 import logging
 import threading
+import websocket
 import requests
 import pandas as pd
 import numpy as np
@@ -36,6 +37,10 @@ HTTP_HEADERS = {
     "Accept": "application/json"
 }
 
+# Global live price variable updated instantly via WebSocket ticks
+latest_websocket_price = None
+price_lock = threading.Lock()
+
 # ---------------------------------------------------------
 # 2. VIRTUAL ACCOUNT & PERSISTENCE
 # ---------------------------------------------------------
@@ -63,27 +68,64 @@ def save_state(state):
 app_state = load_state()
 
 # ---------------------------------------------------------
-# 3. DIRECT REAL XAU/USD SPOT PRICE FETCHING
+# 3. BINANCE WEBSOCKET REAL-TIME FEED
 # ---------------------------------------------------------
-def get_live_xauusd_price():
-    """Fetches real-time XAU/USD Spot Gold Price with fast multi-source fallbacks."""
-    endpoints = [
-        ("https://fxprice.net/fx-api/v1/quotes?symbols=XAU/USD", lambda d: float(d["data"][0]["price"])),
-        ("https://api.metals.live/v1/spot/gold", lambda d: float(d[0]["gold"]) if isinstance(d, list) else float(d.get("price", 0))),
-        ("https://api.mexc.com/api/v3/ticker/price?symbol=PAXGUSDT", lambda d: float(d["price"])),
-        ("https://api.binance.us/api/v3/ticker/price?symbol=PAXGUSDT", lambda d: float(d["price"]))
-    ]
+def on_ws_message(ws, message):
+    global latest_websocket_price
+    try:
+        data = json.loads(message)
+        # Binance trade stream payload format: {"p": "price_string", ...}
+        if "p" in data:
+            price = float(data["p"])
+            with price_lock:
+                latest_websocket_price = round(price, 2)
+    except Exception as e:
+        logging.error(f"WS Message Error: {e}")
+
+def on_ws_error(ws, error):
+    logging.error(f"WebSocket Error: {error}")
+
+def on_ws_close(ws, close_status_code, close_msg):
+    logging.warning("WebSocket closed. Reconnecting in 3 seconds...")
+    time.sleep(3)
+    start_websocket_thread()
+
+def on_ws_open(ws):
+    logging.info("Connected to Binance WebSocket Live Feed for PAXG/XAUUSD!")
+
+def start_websocket_thread():
+    """Runs the Binance WebSocket client continuously in a background thread."""
+    def run_ws():
+        # Binance Spot WebSocket stream for PAXG/USDT trades
+        ws_url = "wss://stream.binance.com:9443/ws/paxgusdt@trade"
+        ws = websocket.WebSocketApp(
+            ws_url,
+            on_open=on_ws_open,
+            on_message=on_ws_message,
+            on_error=on_ws_error,
+            on_close=on_ws_close
+        )
+        ws.run_forever(ping_interval=30, ping_timeout=10)
     
-    for url, parser in endpoints:
-        try:
-            res = requests.get(url, headers=HTTP_HEADERS, timeout=2.0)
-            if res.status_code == 200:
-                price = parser(res.json())
-                if price > 2000: 
-                    return round(price, 2)
-        except Exception as e:
-            logging.error(f"XAUUSD price fetch error for {url}: {e}")
+    wst = threading.Thread(target=run_ws, daemon=True)
+    wst.start()
+
+def get_live_xauusd_price():
+    """Returns the instant price from WebSocket, or uses Yahoo/REST fallback if WS is offline."""
+    global latest_websocket_price
+    with price_lock:
+        if latest_websocket_price and latest_websocket_price > 1000:
+            return latest_websocket_price
             
+    # Fallback to REST API if WebSocket hasn't received a tick yet
+    try:
+        res = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT", headers=HTTP_HEADERS, timeout=2.0)
+        if res.status_code == 200:
+            p = float(res.json()["price"])
+            return round(p, 2)
+    except Exception as e:
+        logging.error(f"REST Price Fallback Error: {e}")
+        
     return None
 
 # ---------------------------------------------------------
@@ -109,50 +151,40 @@ def send_telegram_message(text, photo_bytes=None, target_chat_id=None):
         logging.error(f"Telegram API Error: {e}")
 
 # ---------------------------------------------------------
-# 5. KLINE DATA & FAST CHART GENERATION
+# 5. KLINE DATA & CHART GENERATION
 # ---------------------------------------------------------
 def fetch_and_process_data(interval):
     binance_interval = interval.replace('min', 'm')
-    urls = [
-        f"https://api.mexc.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=30",
-        f"https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=30"
-    ]
+    url = f"https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=30"
     
-    for url in urls:
-        try:
-            res = requests.get(url, headers=HTTP_HEADERS, timeout=2.5)
-            if res.status_code != 200:
-                continue
-                
+    try:
+        res = requests.get(url, headers=HTTP_HEADERS, timeout=2.5)
+        if res.status_code == 200:
             data = res.json()
-            if not isinstance(data, list) or len(data) == 0:
-                continue
+            if isinstance(data, list) and len(data) > 0:
+                df = pd.DataFrame(data, columns=[
+                    'datetime', 'open', 'high', 'low', 'close', 'volume',
+                    'close_time', 'quote_asset_volume', 'number_of_trades',
+                    'taker_buy_base', 'taker_buy_quote', 'ignore'
+                ])
+                df['datetime'] = pd.to_datetime(df['datetime'], unit='ms')
+                df.set_index('datetime', inplace=True)
+                df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
                 
-            df = pd.DataFrame(data, columns=[
-                'datetime', 'open', 'high', 'low', 'close', 'volume',
-                'close_time', 'quote_asset_volume', 'number_of_trades',
-                'taker_buy_base', 'taker_buy_quote', 'ignore'
-            ])
-            
-            df['datetime'] = pd.to_datetime(df['datetime'], unit='ms')
-            df.set_index('datetime', inplace=True)
-            df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
-            
-            df['RSI'] = RSIIndicator(df['close'], window=14).rsi()
-            df['EMA_20'] = EMAIndicator(df['close'], window=20).ema_indicator()
-            df['EMA_50'] = EMAIndicator(df['close'], window=50).ema_indicator()
-            
-            latest_data = df.iloc[-1]
-            context = {
-                "close": latest_data['close'],
-                "rsi": round(latest_data['RSI'], 2),
-                "ema_20": round(latest_data['EMA_20'], 2),
-                "ema_50": round(latest_data['EMA_50'], 2)
-            }
-            
-            return df, context
-        except Exception as e:
-            logging.error(f"Kline fetch error ({url}): {e}")
+                df['RSI'] = RSIIndicator(df['close'], window=14).rsi()
+                df['EMA_20'] = EMAIndicator(df['close'], window=20).ema_indicator()
+                df['EMA_50'] = EMAIndicator(df['close'], window=50).ema_indicator()
+                
+                latest_data = df.iloc[-1]
+                context = {
+                    "close": latest_data['close'],
+                    "rsi": round(latest_data['RSI'], 2),
+                    "ema_20": round(latest_data['EMA_20'], 2),
+                    "ema_50": round(latest_data['EMA_50'], 2)
+                }
+                return df, context
+    except Exception as e:
+        logging.error(f"Kline fetch error: {e}")
             
     return None, None
 
@@ -176,7 +208,7 @@ def generate_candlestick_chart(df, title):
     return buf.getvalue()
 
 # ---------------------------------------------------------
-# 6. CORE TRADING LOGIC (INSTANT EXECUTION)
+# 6. CORE TRADING LOGIC
 # ---------------------------------------------------------
 def execute_trade_logic():
     if app_state["active_trade"]:
@@ -267,7 +299,7 @@ NO TRADE
         logging.error(f"Gemini API Error: {e}")
 
 # ---------------------------------------------------------
-# 7. BACKGROUND THREADS (MONITOR & AUTO-RUNNER)
+# 7. BACKGROUND THREADS
 # ---------------------------------------------------------
 def background_trade_monitor():
     while True:
@@ -325,7 +357,6 @@ def background_trade_monitor():
         time.sleep(1)
 
 def scheduled_market_scanner():
-    """Continuously triggers the market scanner every 60 seconds automatically."""
     while True:
         try:
             if not app_state.get("active_trade"):
@@ -340,7 +371,7 @@ def run_cron_bot():
     return jsonify({"status": "Triggered"}), 200
 
 # ---------------------------------------------------------
-# 8. TELEGRAM COMMANDS
+# 8. TELEGRAM COMMANDS & HEALTH
 # ---------------------------------------------------------
 @app.route('/webhook', methods=['POST'])
 @app.route('/telegram_webhook', methods=['POST'])
@@ -362,7 +393,7 @@ def telegram_webhook():
     elif text.startswith('/price'):
         price = get_live_xauusd_price()
         if price:
-            send_telegram_message(f"📈 *XAU/USD Live Spot Price:* `${price}`", target_chat_id=chat_id)
+            send_telegram_message(f"📈 *XAU/USD Live Spot Price (WS):* `${price}`", target_chat_id=chat_id)
         else:
             send_telegram_message("❌ Error fetching live price.", target_chat_id=chat_id)
         
@@ -382,16 +413,17 @@ def telegram_webhook():
         send_telegram_message(msg, target_chat_id=chat_id)
 
     elif text.startswith('/start'):
-        send_telegram_message("👋 *Welcome to XAU/USD Bot!*\nCommands: /price, /balance, /active, /history", target_chat_id=chat_id)
+        send_telegram_message("👋 *Welcome to XAU/USD Websocket Bot!*\nCommands: /price, /balance, /active, /history", target_chat_id=chat_id)
 
     return jsonify({"status": "ok"}), 200
 
 @app.route('/', methods=['GET', 'HEAD'])
 def health():
-    return "XAUUSD Bot Active", 200
+    return "XAUUSD Websocket Bot Active", 200
 
 if __name__ == '__main__':
-    send_telegram_message("🚀 *xauusd bot has started*")
+    send_telegram_message("🚀 *xauusd websocket bot has started*")
+    start_websocket_thread()
     threading.Thread(target=background_trade_monitor, daemon=True).start()
     threading.Thread(target=scheduled_market_scanner, daemon=True).start()
     app.run(host='0.0.0.0', port=PORT, use_reloader=False)
