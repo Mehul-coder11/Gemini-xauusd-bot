@@ -3,7 +3,6 @@ import requests
 import pandas as pd
 from flask import Flask, request
 from google import genai
-from telegram import Bot
 
 # Initialize Flask App
 app = Flask(__name__)
@@ -13,8 +12,7 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7963353406:AAF-6oU40p
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "-100234567890")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-# Initialize Telegram Bot & Gemini Client
-bot = Bot(token=TELEGRAM_BOT_TOKEN)
+# Initialize Gemini Client
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Global State Variables
@@ -31,7 +29,7 @@ def send_telegram_message(text):
             "text": text,
             "parse_mode": "Markdown"
         }
-        res = requests.post(url, json=payload, timeout=5)
+        res = requests.post(url, json=payload, timeout=10)
         print(f"Telegram API Response -> Status: {res.status_code}, Body: {res.text}")
     except Exception as e:
         print("Telegram Send Exception:", e)
@@ -98,7 +96,7 @@ def get_bot_report(current_price):
 
 def execute_bot_logic():
     try:
-        print("Executing bot logic triggered by /run endpoint...")
+        print("Cron triggered /run: Executing bot analysis...")
         current_price = get_live_binance_price()
         if current_price == 0.0:
             current_price = latest_live_price
@@ -113,7 +111,7 @@ def execute_bot_logic():
         )
         decision = response.text.strip()
         
-        # Send the generated trade advice to Telegram
+        # Send the generated trade advice directly to Telegram
         send_telegram_message(f"🤖 *Gemini Signal Update*\nPrice: ${current_price:.2f}\nAnalysis: {decision}")
     except Exception as e:
         print("Bot Logic Error:", e)
