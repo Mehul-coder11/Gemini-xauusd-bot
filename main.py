@@ -6,7 +6,7 @@ import pandas as pd
 from flask import Flask, request
 from google import genai
 from telegram import Bot
- 
+
 # Initialize Flask App
 app = Flask(__name__)
 
@@ -98,16 +98,23 @@ def get_bot_report(current_price):
     )
 
 def execute_bot_logic():
-    """Core logic evaluated during /run cron triggers or background task."""
     try:
         current_price = get_live_binance_price()
+        if current_price == 0.0:
+            current_price = latest_live_price
+            
         df_1m = fetch_binance_klines("1min")
         
-        # Example evaluation or analysis logic placeholder
-        print(f"Bot executed check. Current Live Price: {current_price}")
+        # Ask Gemini to evaluate the market data
+        prompt = f"Analyze XAUUSD (PAXGUSDT) current price {current_price} and recent candles. Should we BUY, SELL, or HOLD? Give a short reason."
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt
+        )
+        decision = response.text.strip()
         
-        # If you want it to notify on /run cron, you can enable a notification or trade trigger here:
-        # send_telegram_message(f"🔄 Bot check executed. Live Price: ${current_price:.2f}")
+        # Send trade signal/evaluation directly to your Telegram chat
+        send_telegram_message(f"🤖 *Gemini Signal Update*\nPrice: ${current_price:.2f}\nAnalysis: {decision}")
     except Exception as e:
         print("Bot Logic Error:", e)
 
@@ -153,10 +160,9 @@ def telegram_webhook():
 def run_background_loop():
     while True:
         execute_bot_logic()
-        time.sleep(60)
+        time.sleep(600)  # Runs every 10 minutes as a background backup loop
 
 if __name__ == "__main__":
-    # Start background thread as backup for continuous uptime
     threading.Thread(target=run_background_loop, daemon=True).start()
     
     port = int(os.environ.get("PORT", 10000))
