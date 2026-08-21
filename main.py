@@ -179,7 +179,7 @@ def execute_bot_logic():
 
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[prompt, client.types.Part.from_bytes(data=chart_1m_bytes, mime_type="image/png")]
+            contents=[prompt, {"mime_type": "image/png", "data": chart_1m_bytes}]
         )
         decision = response.text.strip()
         decision_upper = decision.upper()
