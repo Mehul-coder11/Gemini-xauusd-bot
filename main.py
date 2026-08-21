@@ -63,26 +63,29 @@ def save_state(state):
 app_state = load_state()
 
 # ---------------------------------------------------------
-# 3. HIGH-SPEED DIRECT PRICE FETCHING (ANTI-BLOCK)
+# 3. DIRECT REAL XAU/USD SPOT PRICE FETCHING
 # ---------------------------------------------------------
-def get_binance_live_price():
-    """Tries primary exchanges direct & fast to eliminate caching and host blocking."""
+def get_live_xauusd_price():
+    """Fetches real-time XAU/USD Forex Spot Gold Price with fast multi-source fallbacks."""
     endpoints = [
+        # Source 1: Swissquote Forex API (XAU/USD Direct)
+        ("https://fxprice.net/fx-api/v1/quotes?symbols=XAU/USD", lambda d: float(d["data"][0]["price"])),
+        # Source 2: Metals API / Fast Forex aggregator
+        ("https://api.metals.live/v1/spot/gold", lambda d: float(d[0]["gold"]) if isinstance(d, list) else float(d.get("price", 0))),
+        # Source 3: Binance PAXG/USDT (Backup if Forex feeds hit rate limit)
         ("https://api.mexc.com/api/v3/ticker/price?symbol=PAXGUSDT", lambda d: float(d["price"])),
-        ("https://api.binance.us/api/v3/ticker/price?symbol=PAXGUSDT", lambda d: float(d["price"])),
-        ("https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT", lambda d: float(d["price"])),
-        ("https://api.coingecko.com/api/v3/simple/price?ids=pax-gold&vs_currencies=usd", lambda d: float(d["pax-gold"]["usd"]))
+        ("https://api.binance.us/api/v3/ticker/price?symbol=PAXGUSDT", lambda d: float(d["price"]))
     ]
     
     for url, parser in endpoints:
         try:
-            res = requests.get(url, headers=HTTP_HEADERS, timeout=2.5)
+            res = requests.get(url, headers=HTTP_HEADERS, timeout=2.0)
             if res.status_code == 200:
                 price = parser(res.json())
-                if price > 0:
-                    return price
+                if price > 2000: # Sanity check for Gold Spot
+                    return round(price, 2)
         except Exception as e:
-            logging.error(f"Price fetch failed for {url}: {e}")
+            logging.error(f"XAUUSD price fetch error for {url}: {e}")
             
     return None
 
@@ -100,16 +103,16 @@ def send_telegram_message(text, photo_bytes=None, target_chat_id=None):
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             files = {'photo': ('chart.png', photo_bytes, 'image/png')}
             data = {'chat_id': chat, 'caption': text, 'parse_mode': 'Markdown'}
-            requests.post(url, data=data, files=files, timeout=10)
+            requests.post(url, data=data, files=files, timeout=8)
         else:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {'chat_id': chat, 'text': text, 'parse_mode': 'Markdown'}
-            requests.post(url, json=payload, timeout=5)
+            requests.post(url, json=payload, timeout=4)
     except Exception as e:
         logging.error(f"Telegram API Error: {e}")
 
 # ---------------------------------------------------------
-# 5. FAST KLINE DATA & OPTIMIZED CHART GENERATION
+# 5. KLINE DATA & FAST CHART GENERATION
 # ---------------------------------------------------------
 def fetch_and_process_data(interval):
     binance_interval = interval.replace('min', 'm')
@@ -120,7 +123,7 @@ def fetch_and_process_data(interval):
     
     for url in urls:
         try:
-            res = requests.get(url, headers=HTTP_HEADERS, timeout=3)
+            res = requests.get(url, headers=HTTP_HEADERS, timeout=2.5)
             if res.status_code != 200:
                 continue
                 
@@ -166,11 +169,11 @@ def generate_candlestick_chart(df, title):
         mpf.make_addplot(plot_df['EMA_50'], color='orange', width=1)
     ]
     
-    fig, ax = mpf.plot(plot_df, type='candle', style=s, addplot=ap, returnfig=True, figsize=(6, 3.5))
+    fig, ax = mpf.plot(plot_df, type='candle', style=s, addplot=ap, returnfig=True, figsize=(6, 3))
     ax[0].set_title(title, fontsize=10, weight='bold')
     
     buf = io.BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight', dpi=80)
+    fig.savefig(buf, format='png', bbox_inches='tight', dpi=75)
     buf.seek(0)
     plt.close(fig)
     return buf.getvalue()
@@ -183,7 +186,7 @@ def background_trade_monitor():
         try:
             trade = app_state.get("active_trade")
             if trade:
-                current_price = get_binance_live_price()
+                current_price = get_live_xauusd_price()
                 if not current_price:
                     time.sleep(2)
                     continue
@@ -236,18 +239,18 @@ def background_trade_monitor():
         time.sleep(2)
 
 # ---------------------------------------------------------
-# 7. CRON TRIGGER ENDPOINT & FAST GEMINI
+# 7. CRON TRIGGER ENDPOINT & GEMINI
 # ---------------------------------------------------------
 @app.route('/run', methods=['GET', 'POST'])
 def run_cron_bot():
     if app_state["active_trade"]:
         return jsonify({"status": "ignored", "message": "Active trade running."}), 200
 
-    current_binance_price = get_binance_live_price()
-    price_display = f"`${current_binance_price}`" if current_binance_price else "Unavailable"
+    current_price = get_live_xauusd_price()
+    price_display = f"`${current_price}`" if current_price else "Unavailable"
     
     send_telegram_message(
-        f"📡 *Analyzing Market...*\n"
+        f"📡 *Analyzing XAU/USD Spot Market...*\n"
         f"💰 *Current Price:* {price_display}"
     )
 
@@ -257,13 +260,16 @@ def run_cron_bot():
     contents = []
     if ctx_1m and ctx_15m:
         prompt = f"""
-Assume you are a professional intraday trader and this is the data of live xauusd.
-Current Price: {current_binance_price}
-1m Context: RSI={ctx_1m['rsi']}, EMA20={ctx_1m['ema_20']}, EMA50={ctx_1m['ema_50']}
-15m Context: RSI={ctx_15m['rsi']}, EMA20={ctx_15m['ema_20']}, EMA50={ctx_15m['ema_50']}
+Assume you are a professional intraday trader analyzing live XAU/USD Spot Gold.
+Current Spot Price: {current_price}
+1m Indicators: RSI={ctx_1m['rsi']}, EMA20={ctx_1m['ema_20']}, EMA50={ctx_1m['ema_50']}
+15m Indicators: RSI={ctx_15m['rsi']}, EMA20={ctx_15m['ema_20']}, EMA50={ctx_15m['ema_50']}
 
-Provide a trade ONLY if confidence is 60%+; otherwise NO TRADE.
-Risk/Reward 1:2. SL <= $4, TP >= $4.
+Provide a trade ONLY if confidence is 60%+; otherwise output NO TRADE.
+Rules:
+- Risk/Reward ratio 1:2 (TP must be double of SL)
+- Stop Loss <= $4
+- Take Profit >= $4
 
 OUTPUT STRICT FORMAT:
 TRADE: BUY (or SELL)
@@ -276,12 +282,12 @@ NO TRADE
 """
         contents.append(prompt)
     else:
-        prompt = f"Current Price: {current_binance_price}\nOUTPUT STRICT FORMAT:\nNO TRADE"
+        prompt = f"Current Price: {current_price}\nOUTPUT STRICT FORMAT:\nNO TRADE"
         contents.append(prompt)
 
-    if df_1m is not None and df_15m is not None:
+    if df_1m is not None:
         try:
-            img_1m = generate_candlestick_chart(df_1m, f"1m Chart - ${current_binance_price}")
+            img_1m = generate_candlestick_chart(df_1m, f"XAU/USD Chart - ${current_price}")
             contents.append(types.Part.from_bytes(data=img_1m, mime_type='image/png'))
         except Exception as e:
             logging.error(f"Chart Attachment Error: {e}")
@@ -297,7 +303,7 @@ NO TRADE
         if "TRADE: BUY" in reply or "TRADE: SELL" in reply:
             lines = reply.split('\n')
             t_type = "BUY" if "BUY" in reply else "SELL"
-            entry_p = current_binance_price if current_binance_price else 0.0
+            entry_p = current_price if current_price else 0.0
             tp_p, sl_p = 0.0, 0.0
             
             for line in lines:
@@ -315,20 +321,20 @@ NO TRADE
             
             app_state["active_trade"] = {
                 "type": t_type, "entry": entry_p, "tp": tp_p, "sl": sl_p, 
-                "size": position_size, "open_pnl": 0.0, "current_price": current_binance_price
+                "size": position_size, "open_pnl": 0.0, "current_price": current_price
             }
             save_state(app_state)
             
             msg = (f"🟢 *NEW TRADE EXECUTED*\n\n"
                    f"Action: *{t_type} XAUUSD*\n"
-                   f"Current Price: `${current_binance_price}`\n"
+                   f"Current Price: `${current_price}`\n"
                    f"Entry Price: `${entry_p}`\n"
                    f"Take Profit: `${tp_p}`\n"
                    f"Stop Loss: `${sl_p}`")
             send_telegram_message(msg)
             return jsonify({"status": "Trade Executed", "reply": reply})
         else:
-            send_telegram_message(f"🚫 *NO TRADE RECOMMENDED*\nCurrent Price: `${current_binance_price}`")
+            send_telegram_message(f"🚫 *NO TRADE RECOMMENDED*\nCurrent Price: `${current_price}`")
             return jsonify({"status": "No Trade"})
 
     except Exception as e:
@@ -356,9 +362,9 @@ def telegram_webhook():
         send_telegram_message(f"💰 *Balance:* `${bal:.2f}`\n*Equity:* `${eq:.2f}`", target_chat_id=chat_id)
         
     elif text.startswith('/price'):
-        price = get_binance_live_price()
+        price = get_live_xauusd_price()
         if price:
-            send_telegram_message(f"📈 *Live Price:* `${price}`", target_chat_id=chat_id)
+            send_telegram_message(f"📈 *XAU/USD Live Spot Price:* `${price}`", target_chat_id=chat_id)
         else:
             send_telegram_message("❌ Error fetching live price.", target_chat_id=chat_id)
         
