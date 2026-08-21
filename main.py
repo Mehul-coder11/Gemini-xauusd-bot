@@ -31,6 +31,9 @@ ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 app = Flask(__name__)
 STATE_FILE = "trading_state.json"
 
+# Standard headers to bypass cloud server IP user-agent blocking
+HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
 # ---------------------------------------------------------
 # 2. VIRTUAL ACCOUNT & PERSISTENCE
 # ---------------------------------------------------------
@@ -61,16 +64,19 @@ app_state = load_state()
 # 3. EXCLUSIVE BINANCE LIVE PRICE FETCHING
 # ---------------------------------------------------------
 def get_binance_live_price():
-    """Fetches real-time Gold price exclusively from Binance Futures endpoints."""
-    symbols = ["XAUUSDT", "PAXGUSDT", "XAUTUSDT"]
-    for sym in symbols:
+    """Fetches real-time Gold price exclusively from Binance APIs."""
+    endpoints = [
+        "https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT",   # Binance Spot Gold Token
+        "https://fapi.binance.com/fapi/v1/ticker/price?symbol=XAUUSDT", # Binance Futures Gold
+        "https://fapi.binance.com/fapi/v1/ticker/price?symbol=PAXGUSDT"
+    ]
+    for url in endpoints:
         try:
-            url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={sym}"
-            res = requests.get(url, timeout=3).json()
+            res = requests.get(url, headers=HTTP_HEADERS, timeout=4).json()
             if "price" in res:
                 return float(res["price"])
         except Exception as e:
-            logging.error(f"Binance fetch error for {sym}: {e}")
+            logging.error(f"Binance price fetch error for {url}: {e}")
     return None
 
 # ---------------------------------------------------------
@@ -99,12 +105,17 @@ def send_telegram_message(text, photo_bytes=None, target_chat_id=None):
 # 5. BINANCE KLINE DATA & CHART GENERATION
 # ---------------------------------------------------------
 def fetch_and_process_data(interval):
-    """Fetches OHLCV candlestick data directly from Binance Futures."""
-    symbols = ["XAUUSDT", "PAXGUSDT", "XAUTUSDT"]
-    for sym in symbols:
+    """Fetches OHLCV candlestick data directly from Binance."""
+    binance_interval = interval.replace('min', 'm')
+    
+    urls = [
+        f"https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=60",
+        f"https://fapi.binance.com/fapi/v1/klines?symbol=XAUUSDT&interval={binance_interval}&limit=60"
+    ]
+    
+    for url in urls:
         try:
-            url = f"https://fapi.binance.com/fapi/v1/klines?symbol={sym}&interval={interval}&limit=60"
-            res = requests.get(url, timeout=10).json()
+            res = requests.get(url, headers=HTTP_HEADERS, timeout=5).json()
             
             if not isinstance(res, list) or len(res) == 0:
                 continue
@@ -133,7 +144,7 @@ def fetch_and_process_data(interval):
             
             return df, context
         except Exception as e:
-            logging.error(f"Binance kline fetch error ({sym}, {interval}): {e}")
+            logging.error(f"Binance kline fetch error ({url}): {e}")
             
     return None, None
 
@@ -229,8 +240,8 @@ def run_cron_bot():
     
     send_telegram_message(f"📡 *Sending Data to Gemini API...*\nCurrent Binance Price: `${current_binance_price}`")
 
-    df_1m, ctx_1m = fetch_and_process_data('1m')
-    df_15m, ctx_15m = fetch_and_process_data('15m')
+    df_1m, ctx_1m = fetch_and_process_data('1min')
+    df_15m, ctx_15m = fetch_and_process_data('15min')
     
     contents = []
     
