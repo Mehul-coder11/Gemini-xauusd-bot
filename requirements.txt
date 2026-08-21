@@ -1,9 +1,6 @@
-Flask
+flask
 requests
 pandas
 matplotlib
 mplfinance
-ta
-pydantic
 google-genai
-gunicorn
