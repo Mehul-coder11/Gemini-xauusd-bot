@@ -32,9 +32,9 @@ def send_telegram_message(text):
             "parse_mode": "Markdown"
         }
         res = requests.post(url, json=payload, timeout=5)
-        print("Telegram response:", res.status_code, res.text)
+        print(f"Telegram API Response -> Status: {res.status_code}, Body: {res.text}")
     except Exception as e:
-        print("Telegram Send Error:", e)
+        print("Telegram Send Exception:", e)
 
 def get_live_binance_price():
     global latest_live_price
@@ -98,7 +98,7 @@ def get_bot_report(current_price):
 
 def execute_bot_logic():
     try:
-        print("Cron triggered /run: Executing bot analysis...")
+        print("Executing bot logic triggered by /run endpoint...")
         current_price = get_live_binance_price()
         if current_price == 0.0:
             current_price = latest_live_price
