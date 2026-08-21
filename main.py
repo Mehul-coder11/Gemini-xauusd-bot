@@ -1,6 +1,7 @@
 import os
 import io
 import time
+import warnings
 import requests
 import pandas as pd
 import matplotlib
@@ -10,9 +11,12 @@ import ta
 from flask import Flask, request
 from google import genai
 
+# Suppress non-critical Pydantic warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+
 app = Flask(__name__)
 
-# Credentials & Configurations (Pulled securely from Render Environment Variables)
+# Credentials & Configurations
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -52,6 +56,10 @@ def send_telegram_message(text, photo_bytes=None):
                 print("Telegram Retry Response:", res_retry.json())
     except Exception as e:
         print("Telegram Send Exception:", e)
+
+def send_startup_message():
+    print("Sending startup notification to Telegram...")
+    send_telegram_message("🚀 *Bot Deployed & Live!*\nYour Trading Bot service has successfully started on Render.")
 
 def get_live_twelvedata_price():
     global latest_live_price
@@ -125,7 +133,6 @@ def execute_bot_logic():
 
         chart_1m_bytes = generate_chart_image(df_1m, "XAUUSD - 1 Min")
         
-        # Check active trades against SL / TP rules
         for t in list(open_trades):
             hit_exit = False
             exit_price = current_price
@@ -192,6 +199,9 @@ def execute_bot_logic():
 
     except Exception as e:
         print("Bot Logic Error:", e)
+
+# Send startup message when process starts
+send_startup_message()
 
 @app.route("/")
 def home():
