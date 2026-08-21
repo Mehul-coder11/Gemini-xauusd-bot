@@ -29,7 +29,10 @@ PROMPT_TEXT = (
     "should be double of sl and teh and only guve trades in which sl should not be more than 4 dollars and "
     "the trades in which has a minimum tp of 4 dollars or more, only guve intraday trades and only guve tp "
     "which will be achieved surely before today market close, and your main objective is to give profitable "
-    "trades and grow the urers capital and the give him net gain"
+    "trades and grow the urers capital and the give him net gain. "
+    "Don't guve me reasons of trade or your analysis , just give me what is the current price and if there is a "
+    "trade then give me only trade decision like entry price and direction of trade and take profit and stop loss, "
+    "make sure that it should reach its tp before today market close"
 )
 
 def send_telegram_message(text):
