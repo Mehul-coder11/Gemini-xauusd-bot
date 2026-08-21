@@ -1,5 +1,6 @@
 import os
 import io
+import threading
 import requests
 import pandas as pd
 import matplotlib
@@ -106,12 +107,15 @@ def home():
 
 @app.route("/run")
 def trigger_run():
-    process_and_analyze()
-    return "Processed successfully", 200
+    # Run in background thread to return 200 OK instantly
+    thread = threading.Thread(target=process_and_analyze)
+    thread.start()
+    return "Job started", 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    process_and_analyze()
+    thread = threading.Thread(target=process_and_analyze)
+    thread.start()
     return "OK", 200
 
 if __name__ == "__main__":
