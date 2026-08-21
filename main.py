@@ -16,7 +16,7 @@ app = Flask(__name__)
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7963353406:AAF-6oU40pXzZ3D6w7c1E450Q-U50607")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "-100234567890")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "demo")  # Replace or set your Twelve Data API key in environment variables
+TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "demo")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -25,7 +25,7 @@ virtual_balance = 10000.0
 open_trades = []
 trade_history = []
 last_run_timestamp = 0
-latest_live_price = 2500.0  # Safe fallback price
+latest_live_price = 2500.0
 
 def send_telegram_message(text, photo_bytes=None):
     try:
@@ -47,6 +47,7 @@ def get_live_twelvedata_price():
         url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={TWELVE_DATA_API_KEY}"
         response = requests.get(url, timeout=5)
         data = response.json()
+        print("Twelve Data Price Response:", data)
         if "price" in data:
             latest_live_price = float(data["price"])
             return latest_live_price
@@ -58,10 +59,10 @@ def fetch_and_prepare_data(interval):
     twelve_interval = "1min" if interval == "1min" else "15min"
     url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval={twelve_interval}&outputsize=50&apikey={TWELVE_DATA_API_KEY}"
     res = requests.get(url).json()
+    print(f"Twelve Data Time Series Response ({interval}):", res)
     
     if "values" not in res:
-        print("Twelve Data Time Series Error:", res)
-        # Return fallback empty-ish dataframe if API fails
+        print("Twelve Data Time Series Error or Rate Limit:", res)
         return pd.DataFrame()
 
     data = []
@@ -107,6 +108,7 @@ def execute_bot_logic():
 
         if df_1m.empty:
             print("Skipping execution due to empty dataset.")
+            send_telegram_message("⚠️ *Bot Error:* Twelve Data returned empty data or hit rate limit.")
             return
 
         chart_1m_bytes = generate_chart_image(df_1m, "XAUUSD - 1 Min")
