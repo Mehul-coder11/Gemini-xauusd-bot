@@ -156,5 +156,9 @@ def telegram_webhook():
     return "OK", 200
 
 if __name__ == "__main__":
+    # Send a startup notification message right as the bot spins up
+    print("Sending startup message to Telegram...")
+    send_telegram_message("🚀 *Gemini XAUUSD Bot has successfully started and is online!*")
+    
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
