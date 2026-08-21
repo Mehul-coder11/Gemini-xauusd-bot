@@ -36,11 +36,20 @@ def send_telegram_message(text, photo_bytes=None):
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
             files = {'photo': ('chart.png', photo_bytes, 'image/png')}
             data = {"chat_id": TELEGRAM_CHAT_ID, "caption": text, "parse_mode": "Markdown"}
-            requests.post(url, data=data, files=files, timeout=15)
+            res = requests.post(url, data=data, files=files, timeout=15)
+            print("Telegram Photo Response:", res.json())
         else:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
             payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "Markdown"}
-            requests.post(url, json=payload, timeout=10)
+            res = requests.post(url, json=payload, timeout=10)
+            print("Telegram Text Response:", res.json())
+            
+            # If Markdown parsing fails, retry without markdown formatting
+            if not res.json().get("ok"):
+                print("Retrying message without Markdown...")
+                payload.pop("parse_mode", None)
+                res_retry = requests.post(url, json=payload, timeout=10)
+                print("Telegram Retry Response:", res_retry.json())
     except Exception as e:
         print("Telegram Send Exception:", e)
 
