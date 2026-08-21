@@ -9,7 +9,7 @@ import mplfinance as mpf
 from flask import Flask, request
 from google import genai
 from google.genai import types
-
+ 
 app = Flask(__name__)
 
 # Fetch configuration strictly from Environment Variables
