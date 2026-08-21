@@ -23,7 +23,6 @@ from google.genai import types
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 PORT = int(os.getenv("PORT", 10000))
@@ -59,17 +58,19 @@ def save_state(state):
 app_state = load_state()
 
 # ---------------------------------------------------------
-# 3. DIRECT BINANCE LIVE PRICE FETCHING
+# 3. EXCLUSIVE BINANCE LIVE PRICE FETCHING
 # ---------------------------------------------------------
 def get_binance_live_price():
-    """Fetches real-time XAU/USD price directly from Binance Futures stream."""
-    try:
-        url = "https://fapi.binance.com/fapi/v1/ticker/price?symbol=XAUUSDT"
-        res = requests.get(url, timeout=3).json()
-        if "price" in res:
-            return float(res["price"])
-    except Exception as e:
-        logging.error(f"Binance fetch error: {e}")
+    """Fetches real-time Gold price exclusively from Binance Futures endpoints."""
+    symbols = ["XAUUSDT", "PAXGUSDT", "XAUTUSDT"]
+    for sym in symbols:
+        try:
+            url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={sym}"
+            res = requests.get(url, timeout=3).json()
+            if "price" in res:
+                return float(res["price"])
+        except Exception as e:
+            logging.error(f"Binance fetch error for {sym}: {e}")
     return None
 
 # ---------------------------------------------------------
@@ -95,38 +96,46 @@ def send_telegram_message(text, photo_bytes=None, target_chat_id=None):
         logging.error(f"Telegram API Error: {e}")
 
 # ---------------------------------------------------------
-# 5. DATA & CHART GENERATION
+# 5. BINANCE KLINE DATA & CHART GENERATION
 # ---------------------------------------------------------
 def fetch_and_process_data(interval):
-    try:
-        url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval={interval}&outputsize=60&apikey={TWELVE_DATA_API_KEY}"
-        res = requests.get(url, timeout=10).json()
-        
-        if 'values' not in res:
-            return None, None
+    """Fetches OHLCV candlestick data directly from Binance Futures."""
+    symbols = ["XAUUSDT", "PAXGUSDT", "XAUTUSDT"]
+    for sym in symbols:
+        try:
+            url = f"https://fapi.binance.com/fapi/v1/klines?symbol={sym}&interval={interval}&limit=60"
+            res = requests.get(url, timeout=10).json()
             
-        df = pd.DataFrame(res['values'])
-        df['datetime'] = pd.to_datetime(df['datetime'])
-        df.set_index('datetime', inplace=True)
-        df = df.astype(float)
-        df.sort_index(inplace=True)
-        
-        df['RSI'] = RSIIndicator(df['close'], window=14).rsi()
-        df['EMA_20'] = EMAIndicator(df['close'], window=20).ema_indicator()
-        df['EMA_50'] = EMAIndicator(df['close'], window=50).ema_indicator()
-        
-        latest_data = df.iloc[-1]
-        context = {
-            "close": latest_data['close'],
-            "rsi": round(latest_data['RSI'], 2),
-            "ema_20": round(latest_data['EMA_20'], 2),
-            "ema_50": round(latest_data['EMA_50'], 2)
-        }
-        
-        return df, context
-    except Exception as e:
-        logging.error(f"Data processing error ({interval}): {e}")
-        return None, None
+            if not isinstance(res, list) or len(res) == 0:
+                continue
+                
+            df = pd.DataFrame(res, columns=[
+                'datetime', 'open', 'high', 'low', 'close', 'volume',
+                'close_time', 'quote_asset_volume', 'number_of_trades',
+                'taker_buy_base', 'taker_buy_quote', 'ignore'
+            ])
+            
+            df['datetime'] = pd.to_datetime(df['datetime'], unit='ms')
+            df.set_index('datetime', inplace=True)
+            df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+            
+            df['RSI'] = RSIIndicator(df['close'], window=14).rsi()
+            df['EMA_20'] = EMAIndicator(df['close'], window=20).ema_indicator()
+            df['EMA_50'] = EMAIndicator(df['close'], window=50).ema_indicator()
+            
+            latest_data = df.iloc[-1]
+            context = {
+                "close": latest_data['close'],
+                "rsi": round(latest_data['RSI'], 2),
+                "ema_20": round(latest_data['EMA_20'], 2),
+                "ema_50": round(latest_data['EMA_50'], 2)
+            }
+            
+            return df, context
+        except Exception as e:
+            logging.error(f"Binance kline fetch error ({sym}, {interval}): {e}")
+            
+    return None, None
 
 def generate_candlestick_chart(df, title):
     plot_df = df.tail(40)
@@ -218,14 +227,13 @@ def run_cron_bot():
 
     current_binance_price = get_binance_live_price()
     
-    send_telegram_message(f"📡 *Sending Data to Gemini API...*\nCurrent Binance XAUUSD Price: `${current_binance_price}`")
+    send_telegram_message(f"📡 *Sending Data to Gemini API...*\nCurrent Binance Price: `${current_binance_price}`")
 
-    df_1m, ctx_1m = fetch_and_process_data('1min')
-    df_15m, ctx_15m = fetch_and_process_data('15min')
+    df_1m, ctx_1m = fetch_and_process_data('1m')
+    df_15m, ctx_15m = fetch_and_process_data('15m')
     
     contents = []
     
-    # Process indicators text input
     if ctx_1m and ctx_15m:
         prompt = f"""
 Assume you are a professional intraday trader and this is the data of live xauusd, with 1 minute chart and 15 minute chart please analyse it carefully ,and guve me a trade in xauusd but guve trade only when you have confidence of 60 to 70 percent or more otherwise say no trade, and when there is a trade then also tell what to do like buy or sell and what is the current price and at what price to enter the trade and what should be the take profit and sl, always keep risk reward ratio to 1 ratio 2 which means to should be double of sl and teh and only guve trades in which sl should not be more than 4 dollars and the trades in which has a minimum tp of 4 dollars or more, only guve intraday trades and only guve tp which will be achieved surely before today market close, and your main objective is to give profitable trades and grow the urers capital and the give him net gain.
@@ -248,11 +256,10 @@ NO TRADE
         prompt = f"Current Binance Price: {current_binance_price}\nOUTPUT STRICT FORMAT:\nNO TRADE"
         contents.append(prompt)
 
-    # Attach chart image buffers safely
     if df_1m is not None and df_15m is not None:
         try:
-            img_1m = generate_candlestick_chart(df_1m, f"XAU/USD 1m Chart - Binance: ${current_binance_price}")
-            img_15m = generate_candlestick_chart(df_15m, f"XAU/USD 15m Chart - Binance: ${current_binance_price}")
+            img_1m = generate_candlestick_chart(df_1m, f"1m Chart - Binance: ${current_binance_price}")
+            img_15m = generate_candlestick_chart(df_15m, f"15m Chart - Binance: ${current_binance_price}")
             contents.append(types.Part.from_bytes(data=img_1m, mime_type='image/png'))
             contents.append(types.Part.from_bytes(data=img_15m, mime_type='image/png'))
         except Exception as e:
