@@ -5,7 +5,6 @@ import json
 import time
 import logging
 import threading
-import websocket
 import requests
 import pandas as pd
 import numpy as np
@@ -26,6 +25,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 PORT = int(os.getenv("PORT", 10000))
 
 ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -36,10 +36,6 @@ HTTP_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0 Safari/537.36",
     "Accept": "application/json"
 }
-
-# Global live price variable updated instantly via WebSocket ticks
-latest_websocket_price = None
-price_lock = threading.Lock()
 
 # ---------------------------------------------------------
 # 2. VIRTUAL ACCOUNT & PERSISTENCE
@@ -60,7 +56,7 @@ def load_state():
 
 def save_state(state):
     try:
-        with open(STATE_FILE, 'w') as f:
+        with open(STATE_FILE, 'w' ) as f:
             json.dump(state, f, indent=4)
     except Exception as e:
         logging.error(f"Error saving state: {e}")
@@ -68,64 +64,26 @@ def save_state(state):
 app_state = load_state()
 
 # ---------------------------------------------------------
-# 3. BINANCE WEBSOCKET REAL-TIME FEED
+# 3. TWELVE DATA REAL-TIME PRICE FETCHING
 # ---------------------------------------------------------
-def on_ws_message(ws, message):
-    global latest_websocket_price
-    try:
-        data = json.loads(message)
-        # Binance trade stream payload format: {"p": "price_string", ...}
-        if "p" in data:
-            price = float(data["p"])
-            with price_lock:
-                latest_websocket_price = round(price, 2)
-    except Exception as e:
-        logging.error(f"WS Message Error: {e}")
-
-def on_ws_error(ws, error):
-    logging.error(f"WebSocket Error: {error}")
-
-def on_ws_close(ws, close_status_code, close_msg):
-    logging.warning("WebSocket closed. Reconnecting in 3 seconds...")
-    time.sleep(3)
-    start_websocket_thread()
-
-def on_ws_open(ws):
-    logging.info("Connected to Binance WebSocket Live Feed for PAXG/XAUUSD!")
-
-def start_websocket_thread():
-    """Runs the Binance WebSocket client continuously in a background thread."""
-    def run_ws():
-        # Binance Spot WebSocket stream for PAXG/USDT trades
-        ws_url = "wss://stream.binance.com:9443/ws/paxgusdt@trade"
-        ws = websocket.WebSocketApp(
-            ws_url,
-            on_open=on_ws_open,
-            on_message=on_ws_message,
-            on_error=on_ws_error,
-            on_close=on_ws_close
-        )
-        ws.run_forever(ping_interval=30, ping_timeout=10)
-    
-    wst = threading.Thread(target=run_ws, daemon=True)
-    wst.start()
-
 def get_live_xauusd_price():
-    """Returns the instant price from WebSocket, or uses Yahoo/REST fallback if WS is offline."""
-    global latest_websocket_price
-    with price_lock:
-        if latest_websocket_price and latest_websocket_price > 1000:
-            return latest_websocket_price
-            
-    # Fallback to REST API if WebSocket hasn't received a tick yet
+    """Fetches real-time XAU/USD Spot Gold Price using Twelve Data API."""
+    if not TWELVE_DATA_API_KEY:
+        logging.error("TWELVE_DATA_API_KEY is missing from environment variables.")
+        return None
+
+    url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={TWELVE_DATA_API_KEY}"
     try:
-        res = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT", headers=HTTP_HEADERS, timeout=2.0)
+        res = requests.get(url, headers=HTTP_HEADERS, timeout=5.0)
         if res.status_code == 200:
-            p = float(res.json()["price"])
-            return round(p, 2)
+            data = res.json()
+            if "price" in data:
+                price = float(data["price"])
+                if price > 1000:
+                    return round(price, 2)
     except Exception as e:
-        logging.error(f"REST Price Fallback Error: {e}")
-        
+        logging.error(f"Twelve Data Price Fetch Error: {e}")
+            
     return None
 
 # ---------------------------------------------------------
@@ -153,23 +111,24 @@ def send_telegram_message(text, photo_bytes=None, target_chat_id=None):
 # ---------------------------------------------------------
 # 5. KLINE DATA & CHART GENERATION
 # ---------------------------------------------------------
-def fetch_and_process_data(interval):
-    binance_interval = interval.replace('min', 'm')
-    url = f"https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=30"
+def fetch_and_process_data(interval_str="1min"):
+    """Fetches historical gold candles from Twelve Data for indicator analysis."""
+    if not TWELVE_DATA_API_KEY:
+        return None, None
+
+    url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval={interval_str}&outputsize=30&apikey={TWELVE_DATA_API_KEY}"
     
     try:
-        res = requests.get(url, headers=HTTP_HEADERS, timeout=2.5)
+        res = requests.get(url, headers=HTTP_HEADERS, timeout=6.0)
         if res.status_code == 200:
             data = res.json()
-            if isinstance(data, list) and len(data) > 0:
-                df = pd.DataFrame(data, columns=[
-                    'datetime', 'open', 'high', 'low', 'close', 'volume',
-                    'close_time', 'quote_asset_volume', 'number_of_trades',
-                    'taker_buy_base', 'taker_buy_quote', 'ignore'
-                ])
-                df['datetime'] = pd.to_datetime(df['datetime'], unit='ms')
+            if "values" in data:
+                rows = data["values"]
+                df = pd.DataFrame(rows)
+                df['datetime'] = pd.to_datetime(df['datetime'])
                 df.set_index('datetime', inplace=True)
-                df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+                df = df[['open', 'high', 'low', 'close']].astype(float)
+                df = df.sort_index() # Twelve Data returns latest first, sort chronological
                 
                 df['RSI'] = RSIIndicator(df['close'], window=14).rsi()
                 df['EMA_20'] = EMAIndicator(df['close'], window=20).ema_indicator()
@@ -178,19 +137,19 @@ def fetch_and_process_data(interval):
                 latest_data = df.iloc[-1]
                 context = {
                     "close": latest_data['close'],
-                    "rsi": round(latest_data['RSI'], 2),
-                    "ema_20": round(latest_data['EMA_20'], 2),
-                    "ema_50": round(latest_data['EMA_50'], 2)
+                    "rsi": round(latest_data['RSI'], 2) if not np.isnan(latest_data['RSI']) else 50.0,
+                    "ema_20": round(latest_data['EMA_20'], 2) if not np.isnan(latest_data['EMA_20']) else latest_data['close'],
+                    "ema_50": round(latest_data['EMA_50'], 2) if not np.isnan(latest_data['EMA_50']) else latest_data['close']
                 }
                 return df, context
     except Exception as e:
-        logging.error(f"Kline fetch error: {e}")
+        logging.error(f"Twelve Data Time Series fetch error: {e}")
             
     return None, None
 
 def generate_candlestick_chart(df, title):
     plot_df = df.tail(20)
-    mc = mpf.make_marketcolors(up='g', down='r', edge='inherit', wick='inherit', volume='in')
+    mc = mpf.make_marketcolors(up='g', down='r', edge='inherit', wick='inherit')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', y_on_right=True)
     
     ap = [
@@ -218,8 +177,8 @@ def execute_trade_logic():
     if not current_price:
         return
 
-    df_1m, ctx_1m = fetch_and_process_data('1min')
-    df_15m, ctx_15m = fetch_and_process_data('15min')
+    df_1m, ctx_1m = fetch_and_process_data("1min")
+    df_15m, ctx_15m = fetch_and_process_data("15min")
     
     contents = []
     if ctx_1m and ctx_15m:
@@ -308,7 +267,7 @@ def background_trade_monitor():
             if trade:
                 current_price = get_live_xauusd_price()
                 if not current_price:
-                    time.sleep(1)
+                    time.sleep(3)
                     continue
 
                 entry = trade["entry"]
@@ -354,7 +313,7 @@ def background_trade_monitor():
                     send_telegram_message(msg)
         except Exception as e:
             logging.error(f"Monitor Thread Error: {e}")
-        time.sleep(1)
+        time.sleep(3)
 
 def scheduled_market_scanner():
     while True:
@@ -393,7 +352,7 @@ def telegram_webhook():
     elif text.startswith('/price'):
         price = get_live_xauusd_price()
         if price:
-            send_telegram_message(f"📈 *XAU/USD Live Spot Price (WS):* `${price}`", target_chat_id=chat_id)
+            send_telegram_message(f"📈 *XAU/USD Live Spot Price (Twelve Data):* `${price}`", target_chat_id=chat_id)
         else:
             send_telegram_message("❌ Error fetching live price.", target_chat_id=chat_id)
         
@@ -413,17 +372,16 @@ def telegram_webhook():
         send_telegram_message(msg, target_chat_id=chat_id)
 
     elif text.startswith('/start'):
-        send_telegram_message("👋 *Welcome to XAU/USD Websocket Bot!*\nCommands: /price, /balance, /active, /history", target_chat_id=chat_id)
+        send_telegram_message("👋 *Welcome to XAU/USD Twelve Data Bot!*\nCommands: /price, /balance, /active, /history", target_chat_id=chat_id)
 
     return jsonify({"status": "ok"}), 200
 
 @app.route('/', methods=['GET', 'HEAD'])
 def health():
-    return "XAUUSD Websocket Bot Active", 200
+    return "XAUUSD Twelve Data Bot Active", 200
 
 if __name__ == '__main__':
-    send_telegram_message("🚀 *xauusd websocket bot has started*")
-    start_websocket_thread()
+    send_telegram_message("🚀 *xauusd bot has started with Twelve Data*")
     threading.Thread(target=background_trade_monitor, daemon=True).start()
     threading.Thread(target=scheduled_market_scanner, daemon=True).start()
     app.run(host='0.0.0.0', port=PORT, use_reloader=False)
