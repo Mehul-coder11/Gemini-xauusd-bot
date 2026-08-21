@@ -10,6 +10,7 @@ import mplfinance as mpf
 import ta
 from flask import Flask, request
 from google import genai
+from google.genai import types
 
 # Suppress non-critical Pydantic warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
@@ -177,9 +178,16 @@ def execute_bot_logic():
             "and suggest explicit SL (Stop Loss) and TP (Take Profit) levels."
         )
 
+        # Updated Gemini SDK payload handling
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[prompt, {"mime_type": "image/png", "data": chart_1m_bytes}]
+            contents=[
+                prompt,
+                types.Part.from_bytes(
+                    data=chart_1m_bytes,
+                    mime_type="image/png"
+                )
+            ]
         )
         decision = response.text.strip()
         decision_upper = decision.upper()
