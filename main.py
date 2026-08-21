@@ -8,33 +8,31 @@ import requests
 import pandas as pd
 import numpy as np
 import matplotlib
-matplotlib.use('Agg') # Required for headless server rendering
+matplotlib.use('Agg')
 import mplfinance as mpf
 from ta.momentum import RSIIndicator
-from ta.trend import MACD, EMAIndicator
+from ta.trend import EMAIndicator
 from flask import Flask, request, jsonify
 from google import genai
 from google.genai import types
 
 # ---------------------------------------------------------
-# 1. CONFIGURATION & ENVIRONMENT VARIABLES
+# 1. CONFIGURATION
 # ---------------------------------------------------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
- 
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 PORT = int(os.getenv("PORT", 10000))
 
-# Initialize Gemini Client
 ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-
 app = Flask(__name__)
 STATE_FILE = "trading_state.json"
 
 # ---------------------------------------------------------
-# 2. VIRTUAL ACCOUNT MANAGEMENT (Persistent)
+# 2. VIRTUAL ACCOUNT & PERSISTENCE
 # ---------------------------------------------------------
 def load_state():
     if os.path.exists(STATE_FILE):
@@ -57,17 +55,28 @@ def save_state(state):
     except Exception as e:
         logging.error(f"Error saving state: {e}")
 
-# Load initial state into memory
 app_state = load_state()
 
 # ---------------------------------------------------------
-# 3. TELEGRAM INTEGRATION
+# 3. DIRECT BINANCE LIVE PRICE FETCHING
+# ---------------------------------------------------------
+def get_binance_live_price():
+    """Fetches real-time XAU/USD price directly from Binance Futures stream."""
+    try:
+        url = "https://fapi.binance.com/fapi/v1/ticker/price?symbol=XAUUSDT"
+        res = requests.get(url, timeout=3).json()
+        if "price" in res:
+            return float(res["price"])
+    except Exception as e:
+        logging.error(f"Binance fetch error: {e}")
+    return None
+
+# ---------------------------------------------------------
+# 4. TELEGRAM INTEGRATION
 # ---------------------------------------------------------
 def send_telegram_message(text, photo_bytes=None):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.warning("Telegram credentials missing. Skipping message.")
         return
-
     try:
         if photo_bytes:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
@@ -82,36 +91,22 @@ def send_telegram_message(text, photo_bytes=None):
         logging.error(f"Telegram API Error: {e}")
 
 # ---------------------------------------------------------
-# 4. DATA FETCHING & INDICATOR PROCESSING
+# 5. DATA & CHART GENERATION
 # ---------------------------------------------------------
-def get_live_price():
-    """Fetches the immediate live spot price of XAUUSD without hitting rate limits excessively."""
-    try:
-        url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={TWELVE_DATA_API_KEY}"
-        res = requests.get(url, timeout=5).json()
-        if "price" in res:
-            return float(res["price"])
-    except Exception as e:
-        logging.error(f"Live price fetch error: {e}")
-    return None
-
 def fetch_and_process_data(interval):
-    """Fetches OHLC data and calculates technical indicators."""
     try:
         url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval={interval}&outputsize=60&apikey={TWELVE_DATA_API_KEY}"
         res = requests.get(url, timeout=10).json()
         
         if 'values' not in res:
-            logging.error(f"API Error fetching {interval}: {res}")
             return None, None
             
         df = pd.DataFrame(res['values'])
         df['datetime'] = pd.to_datetime(df['datetime'])
         df.set_index('datetime', inplace=True)
         df = df.astype(float)
-        df.sort_index(inplace=True) # Sort oldest to newest
+        df.sort_index(inplace=True)
         
-        # Technical Indicators for Gemini Prompt Context
         df['RSI'] = RSIIndicator(df['close'], window=14).rsi()
         df['EMA_20'] = EMAIndicator(df['close'], window=20).ema_indicator()
         df['EMA_50'] = EMAIndicator(df['close'], window=50).ema_indicator()
@@ -130,15 +125,10 @@ def fetch_and_process_data(interval):
         return None, None
 
 def generate_candlestick_chart(df, title):
-    """Generates a professional PNG candlestick chart in memory."""
-    # We plot the last 40 candles for clean visibility
     plot_df = df.tail(40)
-    
-    # Custom professional styling
     mc = mpf.make_marketcolors(up='g', down='r', edge='inherit', wick='inherit', volume='in')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', y_on_right=True)
     
-    # Add EMA lines to the chart visually
     ap = [
         mpf.make_addplot(plot_df['EMA_20'], color='blue', width=1.5),
         mpf.make_addplot(plot_df['EMA_50'], color='orange', width=1.5)
@@ -154,17 +144,17 @@ def generate_candlestick_chart(df, title):
     return buf.getvalue()
 
 # ---------------------------------------------------------
-# 5. LIVE TRADE MONITORING THREAD
+# 6. BINANCE TICK MONITOR (BACKGROUND LOOP)
 # ---------------------------------------------------------
 def background_trade_monitor():
-    """Runs continuously to check open PNL and TP/SL execution using live data ONLY."""
+    """Runs continuously in loop using ONLY Binance live price to monitor trades."""
     while True:
         try:
             trade = app_state.get("active_trade")
             if trade:
-                current_price = get_live_price()
+                current_price = get_binance_live_price()
                 if not current_price:
-                    time.sleep(5)
+                    time.sleep(2)
                     continue
 
                 entry = trade["entry"]
@@ -173,7 +163,6 @@ def background_trade_monitor():
                 sl = trade["sl"]
                 size = trade["size"]
                 
-                # Calculate live unclosed PnL
                 if t_type == "BUY":
                     pnl = (current_price - entry) * size
                     hit_tp = current_price >= tp
@@ -185,9 +174,8 @@ def background_trade_monitor():
                 
                 trade["open_pnl"] = round(pnl, 2)
                 trade["current_price"] = current_price
-                save_state(app_state) # Save PnL updates locally
+                save_state(app_state)
                 
-                # Execute Closure logic
                 if hit_tp or hit_sl:
                     result = "PROFIT (TP) 🎯" if hit_tp else "LOSS (SL) 🛑"
                     app_state["balance"] += pnl
@@ -206,7 +194,7 @@ def background_trade_monitor():
                     msg = (f"🔔 *TRADE CLOSED: {result}*\n\n"
                            f"Type: {t_type}\n"
                            f"Entry: `${entry}`\n"
-                           f"Exit: `${current_price}`\n"
+                           f"Exit (Binance): `${current_price}`\n"
                            f"Net PnL: `${pnl:.2f}`\n"
                            f"New Balance: `${app_state['balance']:.2f}`")
                     send_telegram_message(msg)
@@ -214,34 +202,30 @@ def background_trade_monitor():
         except Exception as e:
             logging.error(f"Monitor Thread Error: {e}")
         
-        # Poll Twelve Data every 15 seconds to respect free-tier limits, 
-        # while keeping live PnL actively updated.
-        time.sleep(15)
+        time.sleep(2)  # Fast 2-second check loop on Binance
 
 # ---------------------------------------------------------
-# 6. CRON TRIGGER ENDPOINT & GEMINI LOGIC
+# 7. CRON TRIGGER ENDPOINT & GEMINI
 # ---------------------------------------------------------
 @app.route('/run', methods=['GET', 'POST'])
 def run_cron_bot():
     if app_state["active_trade"]:
-        return jsonify({"status": "ignored", "message": "Active trade already running."}), 200
+        return jsonify({"status": "ignored", "message": "Active trade running."}), 200
 
-    logging.info("Cron triggered. Fetching market data for Gemini...")
+    current_binance_price = get_binance_live_price()
+    
+    # Notify user live price when firing request to Gemini
+    send_telegram_message(f"📡 *Sending Data to Gemini API...*\nCurrent Binance XAUUSD Price: `${current_binance_price}`")
+
     df_1m, ctx_1m = fetch_and_process_data('1min')
     df_15m, ctx_15m = fetch_and_process_data('15min')
     
     if df_1m is None or df_15m is None:
         return jsonify({"status": "error", "message": "Failed to fetch market data"}), 500
 
-    current_price = get_live_price() or ctx_1m['close']
-    
-    # Notify user that Gemini request is firing
-    send_telegram_message(f"📡 *Fetching Gemini Analysis...*\nCurrent XAUUSD Price: `${current_price}`")
-    
-    img_1m = generate_candlestick_chart(df_1m, f"XAU/USD 1 Min Chart - Live: ${current_price}")
-    img_15m = generate_candlestick_chart(df_15m, f"XAU/USD 15 Min Chart - Live: ${current_price}")
+    img_1m = generate_candlestick_chart(df_1m, f"XAU/USD 1m Chart - Binance: ${current_binance_price}")
+    img_15m = generate_candlestick_chart(df_15m, f"XAU/USD 15m Chart - Binance: ${current_binance_price}")
 
-    # Build History Context
     history_str = "No previous trades yet."
     if app_state["history"]:
         recent_trades = app_state["history"][-5:]
@@ -251,30 +235,22 @@ def run_cron_bot():
         ])
 
     prompt = f"""
-You are a professional intraday high-frequency trader. Analyze this live XAUUSD (Gold) data and charts.
-Current XAUUSD Price: {current_price}
+Assume you are a professional intraday trader and this is the data of live xauusd, with 1 minute chart and 15 minute chart please analyse it carefully ,and guve me a trade in xauusd but guve trade only when you have confidence of 60 to 70 percent or more otherwise say no trade, and when there is a trade then also tell what to do like buy or sell and what is the current price and at what price to enter the trade and what should be the take profit and sl, always keep risk reward ratio to 1 ratio 2 which means to should be double of sl and teh and only guve trades in which sl should not be more than 4 dollars and the trades in which has a minimum tp of 4 dollars or more, only guve intraday trades and only guve tp which will be achieved surely before today market close, and your main objective is to give profitable trades and grow the urers capital and the give him net gain.
 
-Technical Context (1min): RSI={ctx_1m['rsi']}, EMA20={ctx_1m['ema_20']}, EMA50={ctx_1m['ema_50']}
-Technical Context (15min): RSI={ctx_15m['rsi']}, EMA20={ctx_15m['ema_20']}, EMA50={ctx_15m['ema_50']}
+Current Binance Price: {current_binance_price}
+Indicators (1m): RSI={ctx_1m['rsi']}, EMA20={ctx_1m['ema_20']}, EMA50={ctx_1m['ema_50']}
+Indicators (15m): RSI={ctx_15m['rsi']}, EMA20={ctx_15m['ema_20']}, EMA50={ctx_15m['ema_50']}
 
-Last 5 Trade Results (Review to improve your future performance):
+Last 5 Trades given:
 {history_str}
 
-STRICT INSTRUCTIONS:
-1. Review the 1-min and 15-min charts (candlesticks + EMA blue/orange lines) and indicators.
-2. Only output a trade if you have 60% to 70% confidence or higher. Otherwise, say: NO TRADE.
-3. Risk/Reward MUST be exactly 1:2. The TP distance from Entry MUST be double the SL distance.
-4. SL distance MUST NOT exceed $4.00.
-5. TP distance MUST be minimum $4.00 (which implies SL minimum $2.00).
-6. Target achievable intraday moves.
-
-OUTPUT FORMAT (DO NOT output ANY analysis text or reasoning, just the exact block below):
+OUTPUT STRICT FORMAT (No analysis text, no reasoning):
 TRADE: BUY (or SELL)
-ENTRY: [exact numerical price]
-TP: [exact numerical price]
-SL: [exact numerical price]
+ENTRY: [price]
+TP: [price]
+SL: [price]
 
-If no high probability setup is found, output ONLY:
+If no confidence, output strictly:
 NO TRADE
 """
 
@@ -289,52 +265,34 @@ NO TRADE
         )
         
         reply = response.text.strip().upper()
-        logging.info(f"Gemini Response:\n{reply}")
         
         if "TRADE: BUY" in reply or "TRADE: SELL" in reply:
-            try:
-                # Safely parse the response block
-                lines = reply.split('\n')
-                t_type = "BUY" if "BUY" in reply else "SELL"
-                entry_p, tp_p, sl_p = 0.0, 0.0, 0.0
-                
-                for line in lines:
-                    if "ENTRY:" in line: entry_p = float(line.split(':')[1].strip())
-                    if "TP:" in line: tp_p = float(line.split(':')[1].strip())
-                    if "SL:" in line: sl_p = float(line.split(':')[1].strip())
-                
-                # Execute Virtual Trade
-                account_power = app_state["balance"] * app_state["leverage"]
-                position_size = account_power / entry_p
-                
-                app_state["active_trade"] = {
-                    "type": t_type,
-                    "entry": entry_p,
-                    "tp": tp_p,
-                    "sl": sl_p,
-                    "size": position_size,
-                    "open_pnl": 0.0,
-                    "current_price": current_price
-                }
-                save_state(app_state)
-                
-                msg = (f"🟢 *NEW TRADE EXECUTED*\n\n"
-                       f"Action: *{t_type} XAUUSD*\n"
-                       f"Entry Price: `${entry_p}`\n"
-                       f"Take Profit: `${tp_p}`\n"
-                       f"Stop Loss: `${sl_p}`\n"
-                       f"Size (Leveraged): {position_size:.4f} units")
-                send_telegram_message(msg, photo_bytes=img_15m)
-                
-                return jsonify({"status": "Trade Opened", "details": app_state["active_trade"]})
-                
-            except Exception as parse_err:
-                logging.error(f"Error parsing Gemini response: {parse_err}")
-                send_telegram_message("⚠️ *Gemini returned an invalid trade format.*")
-                return jsonify({"status": "Parse Error"}), 500
+            lines = reply.split('\n')
+            t_type = "BUY" if "BUY" in reply else "SELL"
+            entry_p, tp_p, sl_p = current_binance_price, 0.0, 0.0
+            
+            for line in lines:
+                if "ENTRY:" in line: entry_p = float(line.split(':')[1].strip())
+                if "TP:" in line: tp_p = float(line.split(':')[1].strip())
+                if "SL:" in line: sl_p = float(line.split(':')[1].strip())
+            
+            position_size = (app_state["balance"] * app_state["leverage"]) / entry_p
+            
+            app_state["active_trade"] = {
+                "type": t_type, "entry": entry_p, "tp": tp_p, "sl": sl_p, 
+                "size": position_size, "open_pnl": 0.0, "current_price": current_binance_price
+            }
+            save_state(app_state)
+            
+            msg = (f"🟢 *NEW TRADE EXECUTED*\n\n"
+                   f"Action: *{t_type} XAUUSD*\n"
+                   f"Entry Price: `${entry_p}`\n"
+                   f"Take Profit: `${tp_p}`\n"
+                   f"Stop Loss: `${sl_p}`")
+            send_telegram_message(msg)
+            return jsonify({"status": "Trade Executed", "reply": reply})
         else:
-            # NO TRADE executed
-            send_telegram_message("💤 *Analysis complete. No high-probability trade found.* (NO TRADE)")
+            send_telegram_message("NO TRADE")
             return jsonify({"status": "No Trade"})
 
     except Exception as e:
@@ -342,87 +300,57 @@ NO TRADE
         return jsonify({"status": "error", "message": str(e)}), 500
 
 # ---------------------------------------------------------
-# 7. TELEGRAM WEBHOOK / COMMAND HANDLER
+# 8. TELEGRAM COMMANDS
 # ---------------------------------------------------------
 @app.route('/telegram_webhook', methods=['POST'])
 def telegram_webhook():
-    """Handles incoming commands from Telegram."""
     update = request.get_json()
     if not update or 'message' not in update or 'text' not in update['message']:
         return "OK", 200
 
-    chat_id = str(update['message']['chat']['id'])
     text = update['message']['text'].lower().strip()
-    
-    # Simple Security: Only respond to your configured chat ID
-    if chat_id != TELEGRAM_CHAT_ID:
-        return "Unauthorized", 403
 
     if text == '/balance':
         bal = app_state['balance']
         trade = app_state.get('active_trade')
         eq = bal + (trade['open_pnl'] if trade else 0.0)
-        send_telegram_message(f"💰 *Account Status*\nBalance: `${bal:.2f}`\nEquity: `${eq:.2f}`\nLeverage: {app_state['leverage']}x")
+        send_telegram_message(f"💰 *Balance:* `${bal:.2f}`\n*Equity:* `${eq:.2f}`")
         
     elif text == '/price':
-        price = get_live_price()
-        send_telegram_message(f"📈 *Live XAUUSD Price:* `${price}`")
+        price = get_binance_live_price()
+        send_telegram_message(f"📈 *Live Binance XAUUSD:* `${price}`")
         
     elif text == '/active':
         trade = app_state.get('active_trade')
         if trade:
-            msg = (f"📊 *Active Trade: {trade['type']}*\n"
-                   f"Entry: `${trade['entry']}`\n"
-                   f"Current Price: `${trade.get('current_price', 0)}`\n"
-                   f"Open PnL: `${trade.get('open_pnl', 0):.2f}`\n"
-                   f"TP: `${trade['tp']}` | SL: `${trade['sl']}`")
-            send_telegram_message(msg)
+            send_telegram_message(f"📊 *Trade:* {trade['type']}\nEntry: `${trade['entry']}`\nCurrent: `${trade.get('current_price', 0)}`\nPnL: `${trade.get('open_pnl', 0):.2f}`")
         else:
-            send_telegram_message("No active trades running currently.")
+            send_telegram_message("No active trades.")
             
     elif text == '/history':
-        if not app_state["history"]:
-            send_telegram_message("No trade history available yet.")
-        else:
-            hist = app_state["history"][-5:]
-            msg = "📜 *Last 5 Trades:*\n\n"
-            for t in hist:
-                msg += f"• *{t['type']}* | {t['result']}\n  Entry: `${t['entry']}` → Exit: `${t['exit_price']}`\n  PnL: `${t['final_pnl']:.2f}`\n\n"
-            send_telegram_message(msg)
+        hist = app_state["history"][-5:]
+        msg = "📜 *Last Trades:*\n" + "\n".join([f"• {t['type']} | {t['result']} | PnL: `${t['final_pnl']:.2f}`" for t in hist])
+        send_telegram_message(msg)
 
     return "OK", 200
 
-# Endpoint to easily register your Render URL with Telegram Webhooks
 @app.route('/set_webhook', methods=['GET'])
 def set_webhook():
     host_url = request.url_root.replace('http://', 'https://')
-    webhook_url = f"{host_url}telegram_webhook"
-    api_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url={webhook_url}"
-    res = requests.get(api_url).json()
+    res = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook?url={host_url}telegram_webhook").json()
     return jsonify(res)
 
 @app.route('/', methods=['GET'])
-def health_check():
-    return jsonify({"status": "Active", "active_trade": bool(app_state["active_trade"])}), 200
+def health():
+    return "XAUUSD Binance Bot Active", 200
 
-# ---------------------------------------------------------
-# 8. STARTUP SCRIPT
-# ---------------------------------------------------------
 if __name__ == '__main__':
-    logging.info("Starting up Bot & Threads...")
+    send_telegram_message("🚀 *xauusd bot has started*")
+    threading.Thread(target=background_trade_monitor, daemon=True).start()
     
-    # Send Startup Message and attempt an immediate first run in background
-    send_telegram_message("🚀 *XAUUSD AI Trading Bot Started!*\n\nConnected to Binance/TwelveData tick streams.\nMonitoring market for initial entry...")
-    
-    # Start Live Trade Monitor Thread
-    monitor_thread = threading.Thread(target=background_trade_monitor, daemon=True)
-    monitor_thread.start()
-    
-    # Optional: trigger the first run automatically locally (Wait 3 seconds for server to bind)
     def initial_trigger():
         time.sleep(3)
         requests.get(f"http://127.0.0.1:{PORT}/run")
-        
     threading.Thread(target=initial_trigger, daemon=True).start()
     
     app.run(host='0.0.0.0', port=PORT, use_reloader=False)
