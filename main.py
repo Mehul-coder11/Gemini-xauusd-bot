@@ -31,8 +31,12 @@ ai_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 app = Flask(__name__)
 STATE_FILE = "trading_state.json"
 
-# Standard headers to bypass cloud server IP user-agent blocking
-HTTP_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+# Full browser spoofing headers to avoid Cloudflare/Binance hosting block
+HTTP_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9"
+}
 
 # ---------------------------------------------------------
 # 2. VIRTUAL ACCOUNT & PERSISTENCE
@@ -61,22 +65,30 @@ def save_state(state):
 app_state = load_state()
 
 # ---------------------------------------------------------
-# 3. EXCLUSIVE BINANCE LIVE PRICE FETCHING
+# 3. RELIABLE MULTI-ENDPOINT LIVE PRICE FETCHING
 # ---------------------------------------------------------
 def get_binance_live_price():
-    """Fetches real-time Gold price exclusively from Binance APIs."""
+    """Fetches live PAXG (Gold) spot price with reliable fallbacks if primary Binance endpoints block cloud hosting IPs."""
     endpoints = [
-        "https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT",   # Binance Spot Gold Token
-        "https://fapi.binance.com/fapi/v1/ticker/price?symbol=XAUUSDT", # Binance Futures Gold
-        "https://fapi.binance.com/fapi/v1/ticker/price?symbol=PAXGUSDT"
+        "https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT",
+        "https://api1.binance.com/api/v3/ticker/price?symbol=PAXGUSDT",
+        "https://api2.binance.com/api/v3/ticker/price?symbol=PAXGUSDT",
+        "https://api3.binance.com/api/v3/ticker/price?symbol=PAXGUSDT",
+        "https://api.coingecko.com/api/v3/simple/price?ids=pax-gold&vs_currencies=usd"
     ]
+    
     for url in endpoints:
         try:
-            res = requests.get(url, headers=HTTP_HEADERS, timeout=4).json()
-            if "price" in res:
-                return float(res["price"])
+            res = requests.get(url, headers=HTTP_HEADERS, timeout=5)
+            if res.status_code == 200:
+                data = res.json()
+                if "price" in data:
+                    return float(data["price"])
+                elif "pax-gold" in data and "usd" in data["pax-gold"]:
+                    return float(data["pax-gold"]["usd"])
         except Exception as e:
-            logging.error(f"Binance price fetch error for {url}: {e}")
+            logging.error(f"Price fetch error for {url}: {e}")
+            
     return None
 
 # ---------------------------------------------------------
@@ -105,22 +117,26 @@ def send_telegram_message(text, photo_bytes=None, target_chat_id=None):
 # 5. BINANCE KLINE DATA & CHART GENERATION
 # ---------------------------------------------------------
 def fetch_and_process_data(interval):
-    """Fetches OHLCV candlestick data directly from Binance."""
+    """Fetches OHLCV candlestick data directly with fallback mirrors."""
     binance_interval = interval.replace('min', 'm')
     
     urls = [
         f"https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=60",
-        f"https://fapi.binance.com/fapi/v1/klines?symbol=XAUUSDT&interval={binance_interval}&limit=60"
+        f"https://api1.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=60",
+        f"https://api2.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=60"
     ]
     
     for url in urls:
         try:
-            res = requests.get(url, headers=HTTP_HEADERS, timeout=5).json()
-            
-            if not isinstance(res, list) or len(res) == 0:
+            res = requests.get(url, headers=HTTP_HEADERS, timeout=5)
+            if res.status_code != 200:
                 continue
                 
-            df = pd.DataFrame(res, columns=[
+            data = res.json()
+            if not isinstance(data, list) or len(data) == 0:
+                continue
+                
+            df = pd.DataFrame(data, columns=[
                 'datetime', 'open', 'high', 'low', 'close', 'volume',
                 'close_time', 'quote_asset_volume', 'number_of_trades',
                 'taker_buy_base', 'taker_buy_quote', 'ignore'
@@ -144,7 +160,7 @@ def fetch_and_process_data(interval):
             
             return df, context
         except Exception as e:
-            logging.error(f"Binance kline fetch error ({url}): {e}")
+            logging.error(f"Kline fetch error ({url}): {e}")
             
     return None, None
 
@@ -168,10 +184,9 @@ def generate_candlestick_chart(df, title):
     return buf.getvalue()
 
 # ---------------------------------------------------------
-# 6. BINANCE TICK MONITOR (BACKGROUND LOOP)
+# 6. TICK MONITOR (BACKGROUND LOOP)
 # ---------------------------------------------------------
 def background_trade_monitor():
-    """Runs continuously in loop using ONLY Binance live price to monitor trades."""
     while True:
         try:
             trade = app_state.get("active_trade")
@@ -218,7 +233,7 @@ def background_trade_monitor():
                     msg = (f"🔔 *TRADE CLOSED: {result}*\n\n"
                            f"Type: {t_type}\n"
                            f"Entry: `${entry}`\n"
-                           f"Exit (Binance): `${current_price}`\n"
+                           f"Exit Price: `${current_price}`\n"
                            f"Net PnL: `${pnl:.2f}`\n"
                            f"New Balance: `${app_state['balance']:.2f}`")
                     send_telegram_message(msg)
@@ -238,7 +253,11 @@ def run_cron_bot():
 
     current_binance_price = get_binance_live_price()
     
-    send_telegram_message(f"📡 *Sending Data to Gemini API...*\nCurrent Binance Price: `${current_binance_price}`")
+    price_display = f"`${current_binance_price}`" if current_binance_price else "Unavailable"
+    send_telegram_message(
+        f"📡 *Sending Data to Gemini API...*\n"
+        f"💰 *Current Gold Price:* {price_display}"
+    )
 
     df_1m, ctx_1m = fetch_and_process_data('1min')
     df_15m, ctx_15m = fetch_and_process_data('15min')
@@ -249,7 +268,7 @@ def run_cron_bot():
         prompt = f"""
 Assume you are a professional intraday trader and this is the data of live xauusd, with 1 minute chart and 15 minute chart please analyse it carefully ,and guve me a trade in xauusd but guve trade only when you have confidence of 60 to 70 percent or more otherwise say no trade, and when there is a trade then also tell what to do like buy or sell and what is the current price and at what price to enter the trade and what should be the take profit and sl, always keep risk reward ratio to 1 ratio 2 which means to should be double of sl and teh and only guve trades in which sl should not be more than 4 dollars and the trades in which has a minimum tp of 4 dollars or more, only guve intraday trades and only guve tp which will be achieved surely before today market close, and your main objective is to give profitable trades and grow the urers capital and the give him net gain.
 
-Current Binance Price: {current_binance_price}
+Current Price: {current_binance_price}
 Indicators (1m): RSI={ctx_1m['rsi']}, EMA20={ctx_1m['ema_20']}, EMA50={ctx_1m['ema_50']}
 Indicators (15m): RSI={ctx_15m['rsi']}, EMA20={ctx_15m['ema_20']}, EMA50={ctx_15m['ema_50']}
 
@@ -264,13 +283,13 @@ NO TRADE
 """
         contents.append(prompt)
     else:
-        prompt = f"Current Binance Price: {current_binance_price}\nOUTPUT STRICT FORMAT:\nNO TRADE"
+        prompt = f"Current Price: {current_binance_price}\nOUTPUT STRICT FORMAT:\nNO TRADE"
         contents.append(prompt)
 
     if df_1m is not None and df_15m is not None:
         try:
-            img_1m = generate_candlestick_chart(df_1m, f"1m Chart - Binance: ${current_binance_price}")
-            img_15m = generate_candlestick_chart(df_15m, f"15m Chart - Binance: ${current_binance_price}")
+            img_1m = generate_candlestick_chart(df_1m, f"1m Chart - Price: ${current_binance_price}")
+            img_15m = generate_candlestick_chart(df_15m, f"15m Chart - Price: ${current_binance_price}")
             contents.append(types.Part.from_bytes(data=img_1m, mime_type='image/png'))
             contents.append(types.Part.from_bytes(data=img_15m, mime_type='image/png'))
         except Exception as e:
@@ -311,13 +330,14 @@ NO TRADE
             
             msg = (f"🟢 *NEW TRADE EXECUTED*\n\n"
                    f"Action: *{t_type} XAUUSD*\n"
+                   f"Current Price: `${current_binance_price}`\n"
                    f"Entry Price: `${entry_p}`\n"
                    f"Take Profit: `${tp_p}`\n"
                    f"Stop Loss: `${sl_p}`")
             send_telegram_message(msg)
             return jsonify({"status": "Trade Executed", "reply": reply})
         else:
-            send_telegram_message("NO TRADE")
+            send_telegram_message(f"🚫 *NO TRADE RECOMMENDED*\nCurrent Price: `${current_binance_price}`")
             return jsonify({"status": "No Trade"})
 
     except Exception as e:
@@ -346,7 +366,10 @@ def telegram_webhook():
         
     elif text.startswith('/price'):
         price = get_binance_live_price()
-        send_telegram_message(f"📈 *Live Binance XAUUSD:* `${price}`", target_chat_id=chat_id)
+        if price:
+            send_telegram_message(f"📈 *Live Gold (PAXG/USDT):* `${price}`", target_chat_id=chat_id)
+        else:
+            send_telegram_message("❌ *Error fetching live price.* Check host IP restrictions.", target_chat_id=chat_id)
         
     elif text.startswith('/active'):
         trade = app_state.get('active_trade')
@@ -370,7 +393,7 @@ def telegram_webhook():
 
 @app.route('/', methods=['GET', 'HEAD'])
 def health():
-    return "XAUUSD Binance Bot Active", 200
+    return "XAUUSD Bot Active", 200
 
 if __name__ == '__main__':
     send_telegram_message("🚀 *xauusd bot has started*")
