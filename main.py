@@ -4,7 +4,6 @@ import pandas as pd
 from flask import Flask, request
 from google import genai
 
-# Initialize Flask App
 app = Flask(__name__)
 
 # Credentials & Configurations
@@ -95,30 +94,53 @@ def get_bot_report(current_price):
     )
 
 def execute_bot_logic():
+    global virtual_balance
     try:
-        print("Cron triggered /run: Executing bot analysis...")
+        print("Cron triggered /run: Fetching market data & evaluating Gemini AI signals...")
         current_price = get_live_binance_price()
         if current_price == 0.0:
             current_price = latest_live_price
             
         df_1m = fetch_binance_klines("1min")
         
-        # Ask Gemini to evaluate market data
-        prompt = f"Analyze XAUUSD (PAXGUSDT) current price {current_price} and recent candles. Should we BUY, SELL, or HOLD? Give a short reason."
+        # Check active trades against take-profit / stop-loss thresholds
+        for t in list(open_trades):
+            pnl_points = (current_price - t['entry']) if t['type'] == 'BUY' else (t['entry'] - current_price)
+            if pnl_points >= 15.0 or pnl_points <= -10.0:
+                virtual_balance += pnl_points
+                trade_history.append({
+                    "type": t['type'],
+                    "entry": t['entry'],
+                    "exit": current_price,
+                    "pnl": pnl_points
+                })
+                open_trades.remove(t)
+                send_telegram_message(f"🚨 *Trade Closed* ({t['type']})\nExit Price: ${current_price:.2f}\nRealized PnL: ${pnl_points:.2f}\nNew Balance: ${virtual_balance:.2f}")
+
+        # Ask Gemini to evaluate market conditions and give a structured trading decision
+        prompt = f"Analyze XAUUSD (PAXGUSDT) current price {current_price} and recent candles. Should we open a BUY, SELL, or HOLD position? Give a concise reasoning."
         response = client.models.generate_content(
             model="gemini-2.5-flash",
             contents=prompt
         )
         decision = response.text.strip()
-        
-        # Send the generated trade advice directly to Telegram
-        send_telegram_message(f"🤖 *Gemini Signal Update*\nPrice: ${current_price:.2f}\nAnalysis: {decision}")
+        decision_upper = decision.upper()
+
+        if "BUY" in decision_upper and len(open_trades) < 2 and current_price > 0:
+            open_trades.append({"type": "BUY", "entry": current_price})
+            send_telegram_message(f"🟢 *New BUY Trade Opened*\nPrice: ${current_price:.2f}\nAnalysis: {decision}")
+        elif "SELL" in decision_upper and len(open_trades) < 2 and current_price > 0:
+            open_trades.append({"type": "SELL", "entry": current_price})
+            send_telegram_message(f"🔴 *New SELL Trade Opened*\nPrice: ${current_price:.2f}\nAnalysis: {decision}")
+        else:
+            send_telegram_message(f"🤖 *Gemini Market Update (HOLD)*\nPrice: ${current_price:.2f}\nAnalysis: {decision}")
+
     except Exception as e:
         print("Bot Logic Error:", e)
 
 @app.route("/")
 def home():
-    return "Gemini XAUUSD Bot is Live and Running!", 200
+    return "Gemini XAUUSD Trading Bot is Live and Running!", 200
 
 @app.route("/run")
 def trigger_run():
@@ -156,9 +178,8 @@ def telegram_webhook():
     return "OK", 200
 
 if __name__ == "__main__":
-    # Send a startup notification message right as the bot spins up
     print("Sending startup message to Telegram...")
-    send_telegram_message("🚀 *Gemini XAUUSD Bot has successfully started and is online!*")
+    send_telegram_message("🚀 *Gemini XAUUSD Trading Bot has successfully started and is online!*")
     
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
