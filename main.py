@@ -12,9 +12,9 @@ from google import genai
 
 app = Flask(__name__)
 
-# Credentials & Configurations
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "7963353406:AAF-6oU40pXzZ3D6w7c1E450Q-U50607")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "-100234567890")
+# Credentials & Configurations (Pulled securely from Render Environment Variables)
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "demo")
 
@@ -28,6 +28,9 @@ last_run_timestamp = 0
 latest_live_price = 2500.0
 
 def send_telegram_message(text, photo_bytes=None):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram Error: Token or Chat ID is missing from environment variables.")
+        return
     try:
         if photo_bytes:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
