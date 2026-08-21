@@ -87,7 +87,6 @@ def process_and_analyze():
     full_prompt = f"Live Price: {current_price}\n\n" + PROMPT_TEXT
 
     try:
-        # Model set to gemini-2.0-flash-lite
         response = client.models.generate_content(
             model="gemini-2.0-flash-lite",
             contents=[
