@@ -66,13 +66,10 @@ app_state = load_state()
 # 3. DIRECT REAL XAU/USD SPOT PRICE FETCHING
 # ---------------------------------------------------------
 def get_live_xauusd_price():
-    """Fetches real-time XAU/USD Forex Spot Gold Price with fast multi-source fallbacks."""
+    """Fetches real-time XAU/USD Spot Gold Price with fast multi-source fallbacks."""
     endpoints = [
-        # Source 1: Swissquote Forex API (XAU/USD Direct)
         ("https://fxprice.net/fx-api/v1/quotes?symbols=XAU/USD", lambda d: float(d["data"][0]["price"])),
-        # Source 2: Metals API / Fast Forex aggregator
         ("https://api.metals.live/v1/spot/gold", lambda d: float(d[0]["gold"]) if isinstance(d, list) else float(d.get("price", 0))),
-        # Source 3: Binance PAXG/USDT (Backup if Forex feeds hit rate limit)
         ("https://api.mexc.com/api/v3/ticker/price?symbol=PAXGUSDT", lambda d: float(d["price"])),
         ("https://api.binance.us/api/v3/ticker/price?symbol=PAXGUSDT", lambda d: float(d["price"]))
     ]
@@ -82,7 +79,7 @@ def get_live_xauusd_price():
             res = requests.get(url, headers=HTTP_HEADERS, timeout=2.0)
             if res.status_code == 200:
                 price = parser(res.json())
-                if price > 2000: # Sanity check for Gold Spot
+                if price > 2000: 
                     return round(price, 2)
         except Exception as e:
             logging.error(f"XAUUSD price fetch error for {url}: {e}")
@@ -117,8 +114,8 @@ def send_telegram_message(text, photo_bytes=None, target_chat_id=None):
 def fetch_and_process_data(interval):
     binance_interval = interval.replace('min', 'm')
     urls = [
-        f"https://api.mexc.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=40",
-        f"https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=40"
+        f"https://api.mexc.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=30",
+        f"https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval={binance_interval}&limit=30"
     ]
     
     for url in urls:
@@ -160,7 +157,7 @@ def fetch_and_process_data(interval):
     return None, None
 
 def generate_candlestick_chart(df, title):
-    plot_df = df.tail(30)
+    plot_df = df.tail(20)
     mc = mpf.make_marketcolors(up='g', down='r', edge='inherit', wick='inherit', volume='in')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', y_on_right=True)
     
@@ -169,17 +166,108 @@ def generate_candlestick_chart(df, title):
         mpf.make_addplot(plot_df['EMA_50'], color='orange', width=1)
     ]
     
-    fig, ax = mpf.plot(plot_df, type='candle', style=s, addplot=ap, returnfig=True, figsize=(6, 3))
-    ax[0].set_title(title, fontsize=10, weight='bold')
+    fig, ax = mpf.plot(plot_df, type='candle', style=s, addplot=ap, returnfig=True, figsize=(5, 2.5))
+    ax[0].set_title(title, fontsize=9, weight='bold')
     
     buf = io.BytesIO()
-    fig.savefig(buf, format='png', bbox_inches='tight', dpi=75)
+    fig.savefig(buf, format='png', bbox_inches='tight', dpi=70)
     buf.seek(0)
     plt.close(fig)
     return buf.getvalue()
 
 # ---------------------------------------------------------
-# 6. TICK MONITOR (BACKGROUND LOOP)
+# 6. CORE TRADING LOGIC (INSTANT EXECUTION)
+# ---------------------------------------------------------
+def execute_trade_logic():
+    if app_state["active_trade"]:
+        return
+
+    current_price = get_live_xauusd_price()
+    if not current_price:
+        return
+
+    df_1m, ctx_1m = fetch_and_process_data('1min')
+    df_15m, ctx_15m = fetch_and_process_data('15min')
+    
+    contents = []
+    if ctx_1m and ctx_15m:
+        prompt = f"""
+Assume you are a professional intraday trader analyzing live XAU/USD Spot Gold.
+Current Spot Price: {current_price}
+1m Indicators: RSI={ctx_1m['rsi']}, EMA20={ctx_1m['ema_20']}, EMA50={ctx_1m['ema_50']}
+15m Indicators: RSI={ctx_15m['rsi']}, EMA20={ctx_15m['ema_20']}, EMA50={ctx_15m['ema_50']}
+
+Provide a trade ONLY if confidence is 60%+; otherwise output NO TRADE.
+Rules:
+- Risk/Reward ratio 1:2 (TP must be double of SL)
+- Stop Loss <= $4
+- Take Profit >= $4
+
+OUTPUT STRICT FORMAT:
+TRADE: BUY (or SELL)
+ENTRY: [price]
+TP: [price]
+SL: [price]
+
+If no trade:
+NO TRADE
+"""
+        contents.append(prompt)
+    else:
+        return
+
+    if df_1m is not None:
+        try:
+            img_1m = generate_candlestick_chart(df_1m, f"XAU/USD - ${current_price}")
+            contents.append(types.Part.from_bytes(data=img_1m, mime_type='image/png'))
+        except Exception as e:
+            logging.error(f"Chart Attachment Error: {e}")
+
+    try:
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=contents
+        )
+        
+        reply = response.text.strip().upper()
+        
+        if "TRADE: BUY" in reply or "TRADE: SELL" in reply:
+            lines = reply.split('\n')
+            t_type = "BUY" if "BUY" in reply else "SELL"
+            entry_p = current_price
+            tp_p, sl_p = 0.0, 0.0
+            
+            for line in lines:
+                if "ENTRY:" in line: 
+                    try: entry_p = float(line.split(':')[1].strip())
+                    except: pass
+                if "TP:" in line: 
+                    try: tp_p = float(line.split(':')[1].strip())
+                    except: pass
+                if "SL:" in line: 
+                    try: sl_p = float(line.split(':')[1].strip())
+                    except: pass
+            
+            position_size = (app_state["balance"] * app_state["leverage"]) / (entry_p if entry_p > 0 else 1)
+            
+            app_state["active_trade"] = {
+                "type": t_type, "entry": entry_p, "tp": tp_p, "sl": sl_p, 
+                "size": position_size, "open_pnl": 0.0, "current_price": current_price
+            }
+            save_state(app_state)
+            
+            msg = (f"🟢 *NEW TRADE EXECUTED*\n\n"
+                   f"Action: *{t_type} XAUUSD*\n"
+                   f"Current Price: `${current_price}`\n"
+                   f"Entry Price: `${entry_p}`\n"
+                   f"Take Profit: `${tp_p}`\n"
+                   f"Stop Loss: `${sl_p}`")
+            send_telegram_message(msg)
+    except Exception as e:
+        logging.error(f"Gemini API Error: {e}")
+
+# ---------------------------------------------------------
+# 7. BACKGROUND THREADS (MONITOR & AUTO-RUNNER)
 # ---------------------------------------------------------
 def background_trade_monitor():
     while True:
@@ -188,7 +276,7 @@ def background_trade_monitor():
             if trade:
                 current_price = get_live_xauusd_price()
                 if not current_price:
-                    time.sleep(2)
+                    time.sleep(1)
                     continue
 
                 entry = trade["entry"]
@@ -232,114 +320,24 @@ def background_trade_monitor():
                            f"Net PnL: `${pnl:.2f}`\n"
                            f"New Balance: `${app_state['balance']:.2f}`")
                     send_telegram_message(msg)
-                    
         except Exception as e:
             logging.error(f"Monitor Thread Error: {e}")
-        
-        time.sleep(2)
+        time.sleep(1)
 
-# ---------------------------------------------------------
-# 7. CRON TRIGGER ENDPOINT & GEMINI
-# ---------------------------------------------------------
+def scheduled_market_scanner():
+    """Continuously triggers the market scanner every 60 seconds automatically."""
+    while True:
+        try:
+            if not app_state.get("active_trade"):
+                execute_trade_logic()
+        except Exception as e:
+            logging.error(f"Scanner Error: {e}")
+        time.sleep(60)
+
 @app.route('/run', methods=['GET', 'POST'])
 def run_cron_bot():
-    if app_state["active_trade"]:
-        return jsonify({"status": "ignored", "message": "Active trade running."}), 200
-
-    current_price = get_live_xauusd_price()
-    price_display = f"`${current_price}`" if current_price else "Unavailable"
-    
-    send_telegram_message(
-        f"📡 *Analyzing XAU/USD Spot Market...*\n"
-        f"💰 *Current Price:* {price_display}"
-    )
-
-    df_1m, ctx_1m = fetch_and_process_data('1min')
-    df_15m, ctx_15m = fetch_and_process_data('15min')
-    
-    contents = []
-    if ctx_1m and ctx_15m:
-        prompt = f"""
-Assume you are a professional intraday trader analyzing live XAU/USD Spot Gold.
-Current Spot Price: {current_price}
-1m Indicators: RSI={ctx_1m['rsi']}, EMA20={ctx_1m['ema_20']}, EMA50={ctx_1m['ema_50']}
-15m Indicators: RSI={ctx_15m['rsi']}, EMA20={ctx_15m['ema_20']}, EMA50={ctx_15m['ema_50']}
-
-Provide a trade ONLY if confidence is 60%+; otherwise output NO TRADE.
-Rules:
-- Risk/Reward ratio 1:2 (TP must be double of SL)
-- Stop Loss <= $4
-- Take Profit >= $4
-
-OUTPUT STRICT FORMAT:
-TRADE: BUY (or SELL)
-ENTRY: [price]
-TP: [price]
-SL: [price]
-
-If no trade:
-NO TRADE
-"""
-        contents.append(prompt)
-    else:
-        prompt = f"Current Price: {current_price}\nOUTPUT STRICT FORMAT:\nNO TRADE"
-        contents.append(prompt)
-
-    if df_1m is not None:
-        try:
-            img_1m = generate_candlestick_chart(df_1m, f"XAU/USD Chart - ${current_price}")
-            contents.append(types.Part.from_bytes(data=img_1m, mime_type='image/png'))
-        except Exception as e:
-            logging.error(f"Chart Attachment Error: {e}")
-
-    try:
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=contents
-        )
-        
-        reply = response.text.strip().upper()
-        
-        if "TRADE: BUY" in reply or "TRADE: SELL" in reply:
-            lines = reply.split('\n')
-            t_type = "BUY" if "BUY" in reply else "SELL"
-            entry_p = current_price if current_price else 0.0
-            tp_p, sl_p = 0.0, 0.0
-            
-            for line in lines:
-                if "ENTRY:" in line: 
-                    try: entry_p = float(line.split(':')[1].strip())
-                    except: pass
-                if "TP:" in line: 
-                    try: tp_p = float(line.split(':')[1].strip())
-                    except: pass
-                if "SL:" in line: 
-                    try: sl_p = float(line.split(':')[1].strip())
-                    except: pass
-            
-            position_size = (app_state["balance"] * app_state["leverage"]) / (entry_p if entry_p > 0 else 1)
-            
-            app_state["active_trade"] = {
-                "type": t_type, "entry": entry_p, "tp": tp_p, "sl": sl_p, 
-                "size": position_size, "open_pnl": 0.0, "current_price": current_price
-            }
-            save_state(app_state)
-            
-            msg = (f"🟢 *NEW TRADE EXECUTED*\n\n"
-                   f"Action: *{t_type} XAUUSD*\n"
-                   f"Current Price: `${current_price}`\n"
-                   f"Entry Price: `${entry_p}`\n"
-                   f"Take Profit: `${tp_p}`\n"
-                   f"Stop Loss: `${sl_p}`")
-            send_telegram_message(msg)
-            return jsonify({"status": "Trade Executed", "reply": reply})
-        else:
-            send_telegram_message(f"🚫 *NO TRADE RECOMMENDED*\nCurrent Price: `${current_price}`")
-            return jsonify({"status": "No Trade"})
-
-    except Exception as e:
-        logging.error(f"Gemini API Error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+    execute_trade_logic()
+    return jsonify({"status": "Triggered"}), 200
 
 # ---------------------------------------------------------
 # 8. TELEGRAM COMMANDS
@@ -395,4 +393,5 @@ def health():
 if __name__ == '__main__':
     send_telegram_message("🚀 *xauusd bot has started*")
     threading.Thread(target=background_trade_monitor, daemon=True).start()
+    threading.Thread(target=scheduled_market_scanner, daemon=True).start()
     app.run(host='0.0.0.0', port=PORT, use_reloader=False)
