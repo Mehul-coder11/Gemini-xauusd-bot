@@ -23,12 +23,14 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 PROMPT_BASE = (
     "Assume you are a professional intraday trader analyzing live XAU/USD (Gold) data with attached 1-minute and 15-minute chart images. "
     "Evaluate the market structure, momentum, and key indicator values carefully.\n\n"
-    "Rules for trade generation:\n"
-    "- Give a trade decision ONLY if you have high confidence based on market structure and trend alignment. Otherwise, respond strictly with 'NO TRADE'.\n"
-    "- If there is a high probability setup, provide: Direction (BUY/SELL), Entry Price, Stop Loss (SL), Take Profit (TP).\n"
-    "- Base Stop Loss and Take Profit on recent support/resistance levels or swing highs/lows (Aim for a minimum Risk-to-Reward ratio of 1:1.5 or 1:2).\n"
-    "- Focus exclusively on intraday momentum.\n"
-    "- Output ONLY the final trade decision without explanations, reasons, or analysis commentary."
+    "STRICT OUTPUT RULES:\n"
+    "1. Do NOT write explanations, reasoning, commentary, or market condition descriptions under any circumstances.\n"
+    "2. If there is NO high-probability trade set up, reply ONLY with the words: NO TRADE.\n"
+    "3. If there IS a high-probability trade setup (aiming for minimum 1:1.5 or 1:2 R:R), reply ONLY using this exact format:\n"
+    "Direction: [BUY/SELL]\n"
+    "Entry: [Price]\n"
+    "SL: [Price]\n"
+    "TP: [Price]"
 )
 
 def send_telegram_message(text):
@@ -136,7 +138,10 @@ def process_and_analyze():
             ]
         )
         gemini_reply = response.text.strip()
-        send_telegram_message(gemini_reply)
+        
+        # Prepend the current price to every Telegram output
+        final_message = f"📊 XAU/USD Current Price: ${current_price:.2f}\n\n{gemini_reply}"
+        send_telegram_message(final_message)
     except Exception as e:
         print("Gemini API Error:", e)
         send_telegram_message(f"Error generating analysis: {str(e)}")
