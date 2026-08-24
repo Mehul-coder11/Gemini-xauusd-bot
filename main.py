@@ -20,15 +20,19 @@ TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# Refined prompt allowing high & medium probability intraday setups
+# Refined prompt with updated first line and dual-direction rules
 PROMPT_BASE = (
-    "Assume you are an expert intraday XAU/USD (Gold) trader. "
-    "Analyze the provided live price data, indicators, and attached 1-minute and 15-minute charts.\n\n"
+    "Assume you are world's best intraday trader in XAU/USD (Gold). "
+    "Analyze the provided live price data, key technical indicators, and attached 1-minute and 5-minute chart images with maximum precision.\n\n"
+    "TRADE EVALUATION INSTRUCTIONS:\n"
+    "1. You are fully authorized and expected to take BOTH BUY AND SELL TRADES depending on real-time market structure.\n"
+    "2. Evaluate market trend, momentum, support/resistance, RSI, and candle patterns objectively across both timeframes.\n"
+    "3. If the market is in a downtrend or rejecting resistance, generate a SELL trade setup.\n"
+    "4. If the market is in an uptrend or bouncing off support, generate a BUY trade setup.\n\n"
     "STRICT OUTPUT RULES:\n"
-    "1. Do NOT write explanations, commentary, or market condition descriptions.\n"
-    "2. Evaluate the trend, RSI, EMA alignment, and chart patterns.\n"
-    "3. If there is NO viable short-term trade setup, reply ONLY with: NO TRADE.\n"
-    "4. If there IS a viable intraday trade setup (aiming for 1:1.5 or 1:2 R:R), reply ONLY in this exact format:\n"
+    "1. Do NOT write explanations, reasoning, commentary, or market condition descriptions under any circumstances.\n"
+    "2. If there is NO viable trade setup, reply ONLY with: NO TRADE.\n"
+    "3. If there IS a viable trade setup (aiming for 1:1.5 or 1:2 R:R), reply ONLY using this exact format:\n"
     "Direction: [BUY/SELL]\n"
     "Entry: [Price]\n"
     "SL: [Price]\n"
@@ -85,14 +89,10 @@ def compute_indicators(df):
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs.iloc[-1])) if loss.iloc[-1] != 0 else 50
     
-    # Simple trend calculation
-    trend = "BULLISH" if ema20 > ema50 else "BEARISH"
-    
     return {
         "ema20": round(ema20, 2),
         "ema50": round(ema50, 2),
         "rsi": round(rsi, 2),
-        "trend": trend,
         "recent_high": round(df['high'].max(), 2),
         "recent_low": round(df['low'].min(), 2)
     }
@@ -106,38 +106,37 @@ def generate_chart_bytes(df, title):
 
 def process_and_analyze():
     df_1m = fetch_chart_data("1min")
-    df_15m = fetch_chart_data("15min")
+    df_5m = fetch_chart_data("5min")
 
-    if df_1m.empty or df_15m.empty:
+    if df_1m.empty or df_5m.empty:
         send_telegram_message("Error: Unable to fetch candle data from Twelve Data API.")
         return
 
     current_price = df_1m.iloc[-1]['close']
-    ind_15m = compute_indicators(df_15m)
+    ind_5m = compute_indicators(df_5m)
 
-    chart_1m_bytes = generate_chart_bytes(df_1m, "XAUUSD - 1 Min")
-    chart_15m_bytes = generate_chart_bytes(df_15m, "XAUUSD - 15 Min")
+    # Generate visual PNG bytes for 1-minute and 5-minute charts
+    chart_1m_bytes = generate_chart_bytes(df_1m, "XAUUSD - 1 Min Frame")
+    chart_5m_bytes = generate_chart_bytes(df_5m, "XAUUSD - 5 Min Frame")
 
     metrics_text = (
         f"Live Price: {current_price}\n"
-        f"15m Structure Trend: {ind_15m.get('trend', 'N/A')}\n"
-        f"15m EMA20: {ind_15m.get('ema20', 'N/A')}\n"
-        f"15m EMA50: {ind_15m.get('ema50', 'N/A')}\n"
-        f"15m RSI(14): {ind_15m.get('rsi', 'N/A')}\n"
-        f"Recent High: {ind_15m.get('recent_high', 'N/A')}\n"
-        f"Recent Low: {ind_15m.get('recent_low', 'N/A')}\n\n"
+        f"5m EMA20: {ind_5m.get('ema20', 'N/A')}\n"
+        f"5m EMA50: {ind_5m.get('ema50', 'N/A')}\n"
+        f"5m RSI(14): {ind_5m.get('rsi', 'N/A')}\n"
+        f"Recent 5m High: {ind_5m.get('recent_high', 'N/A')}\n"
+        f"Recent 5m Low: {ind_5m.get('recent_low', 'N/A')}\n\n"
     )
 
     full_prompt = metrics_text + PROMPT_BASE
 
     try:
-        # Changed to supported production model 'gemini-2.5-flash-lite'
         response = client.models.generate_content(
             model="gemini-2.5-flash-lite",
             contents=[
                 full_prompt,
-                types.Part.from_bytes(data=chart_1m_bytes, mime_type="image/png"),
-                types.Part.from_bytes(data=chart_15m_bytes, mime_type="image/png")
+                types.Part.from_bytes(data=chart_5m_bytes, mime_type="image/png"),
+                types.Part.from_bytes(data=chart_1m_bytes, mime_type="image/png")
             ]
         )
         gemini_reply = response.text.strip()
