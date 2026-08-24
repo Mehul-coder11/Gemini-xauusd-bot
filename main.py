@@ -20,13 +20,15 @@ TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Refined prompt allowing high & medium probability intraday setups
 PROMPT_BASE = (
-    "Assume you are a professional intraday trader analyzing live XAU/USD (Gold) data with attached 1-minute and 15-minute chart images. "
-    "Evaluate the market structure, momentum, and key indicator values carefully.\n\n"
+    "Assume you are an expert intraday XAU/USD (Gold) trader. "
+    "Analyze the provided live price data, indicators, and attached 1-minute and 15-minute charts.\n\n"
     "STRICT OUTPUT RULES:\n"
-    "1. Do NOT write explanations, reasoning, commentary, or market condition descriptions under any circumstances.\n"
-    "2. If there is NO high-probability trade set up, reply ONLY with the words: NO TRADE.\n"
-    "3. If there IS a high-probability trade setup (aiming for minimum 1:1.5 or 1:2 R:R), reply ONLY using this exact format:\n"
+    "1. Do NOT write explanations, commentary, or market condition descriptions.\n"
+    "2. Evaluate the trend, RSI, EMA alignment, and chart patterns.\n"
+    "3. If there is NO viable short-term trade setup, reply ONLY with: NO TRADE.\n"
+    "4. If there IS a viable intraday trade setup (aiming for 1:1.5 or 1:2 R:R), reply ONLY in this exact format:\n"
     "Direction: [BUY/SELL]\n"
     "Entry: [Price]\n"
     "SL: [Price]\n"
@@ -76,27 +78,27 @@ def compute_indicators(df):
     ema20 = close.ewm(span=20, adjust=False).mean().iloc[-1]
     ema50 = close.ewm(span=50, adjust=False).mean().iloc[-1]
     
-    # Simple RSI calculation
+    # RSI calculation
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs.iloc[-1])) if loss.iloc[-1] != 0 else 50
     
-    high_recent = df['high'].max()
-    low_recent = df['low'].min()
+    # Simple trend calculation
+    trend = "BULLISH" if ema20 > ema50 else "BEARISH"
     
     return {
         "ema20": round(ema20, 2),
         "ema50": round(ema50, 2),
         "rsi": round(rsi, 2),
-        "recent_high": round(high_recent, 2),
-        "recent_low": round(low_recent, 2)
+        "trend": trend,
+        "recent_high": round(df['high'].max(), 2),
+        "recent_low": round(df['low'].min(), 2)
     }
 
 def generate_chart_bytes(df, title):
     buf = io.BytesIO()
-    # Using last 50 candles for chart plotting
     plot_df = df.tail(50)
     mpf.plot(plot_df, type='candle', style='charles', volume=True, title=title, savefig=dict(fname=buf, format='png', dpi=100))
     buf.seek(0)
@@ -116,9 +118,9 @@ def process_and_analyze():
     chart_1m_bytes = generate_chart_bytes(df_1m, "XAUUSD - 1 Min")
     chart_15m_bytes = generate_chart_bytes(df_15m, "XAUUSD - 15 Min")
 
-    # Construct explicit context text
     metrics_text = (
         f"Live Price: {current_price}\n"
+        f"15m Structure Trend: {ind_15m.get('trend', 'N/A')}\n"
         f"15m EMA20: {ind_15m.get('ema20', 'N/A')}\n"
         f"15m EMA50: {ind_15m.get('ema50', 'N/A')}\n"
         f"15m RSI(14): {ind_15m.get('rsi', 'N/A')}\n"
@@ -129,8 +131,9 @@ def process_and_analyze():
     full_prompt = metrics_text + PROMPT_BASE
 
     try:
+        # Changed to supported production model 'gemini-2.5-flash-lite'
         response = client.models.generate_content(
-            model="gemini-3.5-flash-lite",
+            model="gemini-2.5-flash-lite",
             contents=[
                 full_prompt,
                 types.Part.from_bytes(data=chart_1m_bytes, mime_type="image/png"),
@@ -139,7 +142,6 @@ def process_and_analyze():
         )
         gemini_reply = response.text.strip()
         
-        # Prepend the current price to every Telegram output
         final_message = f"📊 XAU/USD Current Price: ${current_price:.2f}\n\n{gemini_reply}"
         send_telegram_message(final_message)
     except Exception as e:
@@ -149,7 +151,6 @@ def process_and_analyze():
 def notify_startup():
     send_telegram_message("🚀 XAUUSD Analysis Bot has been started and is ready for triggers!")
 
-# Send start message as soon as the script loads
 notify_startup()
 
 @app.route("/")
